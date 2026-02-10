@@ -2,7 +2,7 @@
 
 将 `.adofai` 谱面文件转换为打击音效的高性能工具。
 
-## 下载
+## 编译下载（可在 `Release` 或下文处下载）
 
 - [HitSound.exe](https://github.com/Maicy0609/ADOFAI_HitSound/raw/main/x64/Release/HitSound.exe)
 - [hit.wav](https://github.com/Maicy0609/ADOFAI_HitSound/blob/raw/x64/Release/hit.wav)
