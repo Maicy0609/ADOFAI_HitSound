@@ -5,9 +5,11 @@
 ## 下载
 
 - [HitSound.exe](https://github.com/Maicy0609/ADOFAI_HitSound/raw/main/x64/Release/HitSound.exe)
-- [hit.wav](https://github.com/Maicy0609/ADOFAI_HitSound/blob/main/x64/Release/hit.wav)
+- [hit.wav](https://github.com/Maicy0609/ADOFAI_HitSound/blob/raw/x64/Release/hit.wav)
+- [Tempest.adofai](https://github.com/Maicy0609/ADOFAI_HitSound/blob/raw/x64/Release/Tempest.adofai)
 
-> 请将两个文件置于同一目录下运行。
+> 注：Tempest.adofai为互联网收集，仅供测试
+> 请将 `HitSound.exe` 和 `hit.wav` 置于同一目录下运行。
 
 ## 使用方法
 
