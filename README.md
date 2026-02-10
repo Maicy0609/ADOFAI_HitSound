@@ -12,11 +12,8 @@
 ## 使用方法
 
 1. 确保 `HitSound.exe` 与 `hit.wav` 位于同一文件夹
-2. 将 `.adofai` 谱面文件拖入 `HitSound.exe`，或通过命令行执行：
-   ```cmd
-   HitSound.exe your_level.adofai
-   ```
-3. 输出文件将生成于谱面同目录，文件名后缀为 `_hitsound`
+2. 启动 `HitSound.exe` 在交互中，将 `.adofai` 谱面文件拖入
+3. 输出文件将生成于谱面同目录
 
 ## 特性
 
