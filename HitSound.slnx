@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="HitSound.vcxproj" Id="f1a6faa4-28b1-428e-a796-a577ce3fd0e3" />
+</Solution>
