@@ -1,4 +1,4 @@
-﻿#define NOMINMAX
+#define NOMINMAX
 #include <windows.h>
 #include <shlwapi.h>
 #pragma comment(lib, "shlwapi.lib")
@@ -15,10 +15,11 @@
 #include <unordered_map>
 #include <vector>
 
-#include <xmmintrin.h>  // 新增：用于Flush Denormals优化
+#include <xmmintrin.h>
 
 #include "rapidjson/document.h"
 #include "rapidjson/error/en.h"
+
 
 struct Tile {
     double angle;
@@ -180,20 +181,18 @@ static void write_wav(const std::string& path, int sr, const std::vector<int16_t
     fclose(fp);
 }
 
-static std::vector<float> resample_linear(const std::vector<float>& x, int num) {
-    size_t old_len = x.size();
-    if (static_cast<int>(old_len) == num) return x;
-
-    std::vector<float> y(num);
-    double ratio = static_cast<double>(old_len) / num;
-    for (int i = 0; i < num; ++i) {
-        double src = i * ratio;
-        size_t i0 = static_cast<size_t>(src);
-        size_t i1 = std::min(i0 + 1, old_len - 1);
-        float f = static_cast<float>(src - i0);
-        y[i] = x[i0] * (1.0f - f) + x[i1] * f;
+static std::vector<float> pitch_shift(const std::vector<float>& input, double factor) {
+    if (factor == 1.0) return input;
+    int new_len = static_cast<int>(input.size() / factor);
+    std::vector<float> output(new_len);
+    for (int i = 0; i < new_len; ++i) {
+        double src_idx = i * factor;
+        int idx0 = static_cast<int>(src_idx);
+        int idx1 = std::min(idx0 + 1, static_cast<int>(input.size()) - 1);
+        float frac = static_cast<float>(src_idx - idx0);
+        output[i] = input[idx0] * (1.0f - frac) + input[idx1] * frac;
     }
-    return y;
+    return output;
 }
 
 static void print_progress(size_t cur, size_t total, const std::string& prefix) {
@@ -208,7 +207,7 @@ static void print_progress(size_t cur, size_t total, const std::string& prefix) 
 }
 
 static std::vector<Tile> load_adofai(const std::string& path) {
-    auto parse_start = std::chrono::high_resolution_clock::now();  // 新增：计时开始
+    auto start = std::chrono::high_resolution_clock::now();
 
     FILE* fp = nullptr;
     fopen_s(&fp, path.c_str(), "rb");
@@ -220,14 +219,14 @@ static std::vector<Tile> load_adofai(const std::string& path) {
     fread(&content[0], 1, static_cast<size_t>(fsize), fp);
     fclose(fp);
 
-    size_t start = 0;
+    size_t start_offset = 0;
     if (content.size() >= 3 && static_cast<uint8_t>(content[0]) == 0xEF &&
         static_cast<uint8_t>(content[1]) == 0xBB && static_cast<uint8_t>(content[2]) == 0xBF) {
-        start = 3;
+        start_offset = 3;
     }
 
     rapidjson::Document doc;
-    doc.ParseInsitu<rapidjson::kParseTrailingCommasFlag>(const_cast<char*>(content.data() + start));
+    doc.ParseInsitu<rapidjson::kParseTrailingCommasFlag>(const_cast<char*>(content.data() + start_offset));
     if (doc.HasParseError()) {
         throw std::runtime_error(rapidjson::GetParseError_En(doc.GetParseError()));
     }
@@ -313,30 +312,31 @@ static std::vector<Tile> load_adofai(const std::string& path) {
     }
     print_progress(n_tiles, n_tiles, "计算进度:");
 
-    double parse_dur = std::chrono::duration<double>(std::chrono::high_resolution_clock::now() - parse_start).count();  // 新增：计时结束
-    printf("\n谱面加载完成，用时 %.3f 秒\n", parse_dur);  // 新增：精确匹配Python格式
+    auto dur = std::chrono::duration<double>(std::chrono::high_resolution_clock::now() - start).count();
+    printf("\n谱面加载完成，用时 %.3f 秒\n", dur);
 
     return tiles;
 }
 
 static void generate_hitsound(const std::vector<Tile>& tiles, const std::string& out_path, int pitch) {
-    auto synth_start = std::chrono::high_resolution_clock::now();  // 新增：计时开始
+    _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
 
-    _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);  // 新增：Flush Denormals（关键性能提升，无听感影响）
+    auto start = std::chrono::high_resolution_clock::now();
 
     std::string hit_path = get_exe_directory() + "\\hit.wav";
-    auto [sr, hit] = read_wav(hit_path);
+    auto [hit_sr, original_beat] = read_wav(hit_path);
 
     float peak = 0.0f;
-    for (float v : hit) peak = std::max(peak, std::abs(v));
+    for (float v : original_beat) peak = std::max(peak, std::abs(v));
     if (peak > 0.0f) {
-        for (float& v : hit) v /= peak;
+        for (float& v : original_beat) v /= peak;
     }
 
-    if (pitch != 100) {
-        int new_len = static_cast<int>(hit.size() * 100.0 / pitch + 0.5);
-        hit = resample_linear(hit, new_len);
-    }
+    int base_pitch = (pitch <= 37) ? 25 : (pitch <= 75) ? 50 : (pitch <= 150) ? 100 : 200;
+    double shift_factor = 100.0 / base_pitch;
+    std::vector<float> hit_beat = pitch_shift(original_beat, shift_factor);
+
+    
 
     size_t n = tiles.size() - 1;
     std::vector<double> offsets(n);
@@ -348,22 +348,22 @@ static void generate_hitsound(const std::vector<Tile>& tiles, const std::string&
 
     std::vector<int64_t> pins(n);
     for (size_t i = 0; i < n; ++i) {
-        pins[i] = static_cast<int64_t>(offsets[i] * sr);
+        pins[i] = static_cast<int64_t>(offsets[i] * hit_sr);  // 恢复原始写法
     }
 
-    size_t L = hit.size();
+    size_t L = hit_beat.size();
     int64_t total64 = pins.back() + static_cast<int64_t>(L);
     size_t total_samples = static_cast<size_t>(std::max<int64_t>(total64, 0));
     std::vector<float> output(total_samples, 0.0f);
 
     std::cout << "合成 WAV...\n";
     for (size_t i = 0; i < n; ++i) {
-        int64_t start = pins[i];
-        if (start < 0) continue;
+        int64_t start_pos = pins[i];
+        if (start_pos < 0) continue;
         float vol = volumes[i];
-        size_t len = std::min(L, total_samples - static_cast<size_t>(start));
+        size_t len = std::min(L, total_samples - static_cast<size_t>(start_pos));
         for (size_t j = 0; j < len; ++j) {
-            output[static_cast<size_t>(start) + j] += hit[j] * vol;  // 已统一乘法（无分支）
+            output[static_cast<size_t>(start_pos) + j] += hit_beat[j] * vol;
         }
         if ((i + 1) % std::max<size_t>(1, n / 20) == 0) {
             print_progress(i + 1, n, "合成进度:");
@@ -385,10 +385,10 @@ static void generate_hitsound(const std::vector<Tile>& tiles, const std::string&
         else out16[i] = static_cast<int16_t>(v + (v >= 0.0f ? 0.5f : -0.5f));
     }
 
-    write_wav(out_path, sr, out16);
+    write_wav(out_path, hit_sr, out16);
 
-    double synth_dur = std::chrono::duration<double>(std::chrono::high_resolution_clock::now() - synth_start).count();  // 新增：计时结束
-    printf("\n合成完成，用时 %.3f 秒\n", synth_dur);  // 新增：精确匹配Python格式
+    auto dur = std::chrono::duration<double>(std::chrono::high_resolution_clock::now() - start).count();
+    printf("\n合成完成，用时 %.3f 秒\n", dur);
 }
 
 int main() {
