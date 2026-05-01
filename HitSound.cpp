@@ -1,419 +1,543 @@
+﻿// HitSound.cpp — MSVC2022 C++17
+// cl /std:c++17 /O2 /arch:AVX2 /EHsc HitSound.cpp /I./rapidjson
+
 #define NOMINMAX
+#define _CRT_SECURE_NO_WARNINGS
+#define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <shlwapi.h>
 #pragma comment(lib, "shlwapi.lib")
 
-#include <algorithm>
-#include <chrono>
-#include <cmath>
-#include <cstdint>
-#include <cstdio>
-#include <cstring>
-#include <fstream>
 #include <iostream>
+#include <fstream>
+#include <vector>
 #include <string>
 #include <unordered_map>
-#include <vector>
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
 
-#include <xmmintrin.h>
-
+#pragma warning(push)
+#pragma warning(disable: 4996)
 #include "rapidjson/document.h"
-#include "rapidjson/error/en.h"
+#pragma warning(pop)
 
-
+// ── Tile ─────────────────────────────────────────────────────
 struct Tile {
-    double angle;
-    double bpm;
-    double stdbpm;
-    double bpmangle;
-    bool twirl;
-    double pause;
-    bool midspin;
-    bool hold;
-    bool clock_wise;
-    double offset;
-    double beat;
-    double volume;
+    double angle = 0, bpm = -1, stdbpm = -1, bpmangle = 0, pause = 0, offset = 0, beat = 0, volume = -1;
+    bool twirl = false, midspin = false, hold = false;
+    int cw = 1;
+    explicit Tile(double a = 0) :angle(a) {}
 
-    Tile(double a = 0.0)
-        : angle(a), bpm(0.0), stdbpm(0.0), bpmangle(0.0), twirl(false), pause(0.0),
-        midspin(false), hold(false), clock_wise(true), offset(0.0), beat(0.0), volume(-1.0) {
+    void update(const Tile* p) {
+        if (p) {
+            if (angle == 999.0) { midspin = true; angle = p->angle - 180.0; }
+            double da = 180.0 - angle + p->angle;
+            if (da >= 360)da -= 360; else if (da < 0)da += 360;
+            cw = p->cw ^ (twirl ? 1 : 0);
+            double ao = cw ? ((da == 0 && !midspin) ? 360 : da) : (midspin ? 0 : (360 - da));
+            if (stdbpm < 0 && p->stdbpm>0) stdbpm = -stdbpm * p->stdbpm;
+            else if (stdbpm < 0)         stdbpm = p->stdbpm;
+            bpm = (bpmangle > 0 && ao > 0) ? (stdbpm * (ao - bpmangle) + p->stdbpm * bpmangle) / ao : stdbpm;
+            offset = p->offset + (ao / 180.0 + pause) * (60.0 / bpm);
+            beat = p->beat + ao / 180.0 + pause;
+            if (volume < 0)volume = p->volume;
+        }
+        else {
+            if (stdbpm < 0)stdbpm = 100; if (bpm < 0)bpm = stdbpm;
+            cw = 1 ^ (twirl ? 1 : 0); offset = 0; beat = 0; volume = std::max(volume, 100.0);
+        }
     }
 };
 
-static void Tile_update(Tile& tile, const Tile* prev, double pitch_factor) {
-    if (prev == nullptr) {
-        tile.stdbpm = tile.stdbpm > 0.0 ? tile.stdbpm : 100.0;
-        tile.bpm = tile.bpm > 0.0 ? tile.bpm : tile.stdbpm;
-        tile.clock_wise = !tile.twirl;
-        tile.offset = 0.0;
-        tile.beat = 0.0;
-        tile.volume = tile.volume >= 0.0 ? tile.volume : 100.0;
+// ── 谱面加载 ─────────────────────────────────────────────────
+static std::vector<Tile> load_adofai(const std::string& path)
+{
+    std::ifstream f(path, std::ios::binary);
+    if (!f) { std::cerr << "cannot open " << path << '\n'; exit(1); }
+    std::string s((std::istreambuf_iterator<char>(f)), {});
+
+    if (s.size() >= 3 && (unsigned char)s[0] == 0xEF && (unsigned char)s[1] == 0xBB && (unsigned char)s[2] == 0xBF)
+        s.erase(0, 3);
+    s.erase(std::remove_if(s.begin(), s.end(), [](unsigned char c) {
+        return c < 0x20 && c != '\t' && c != '\n' && c != '\r'; }), s.end());
+
+    rapidjson::Document doc;
+    doc.Parse<rapidjson::kParseTrailingCommasFlag>(s.c_str());
+    if (doc.HasParseError()) { std::cerr << "JSON error\n"; exit(1); }
+
+    static const std::unordered_map<char, double> pd = {
+        {'R',0},{'p',15},{'J',30},{'E',45},{'T',60},{'o',75},
+        {'U',90},{'q',105},{'G',120},{'Q',135},{'H',150},{'W',165},
+        {'L',180},{'x',195},{'N',210},{'Z',225},{'F',240},{'V',255},
+        {'D',270},{'Y',285},{'B',300},{'C',315},{'M',330},{'A',345},
+        {'5',555},{'6',666},{'7',777},{'8',888},{'!',999} };
+
+    std::vector<double> ad;
+    if (doc.HasMember("angleData") && doc["angleData"].IsArray()) {
+        const auto& a = doc["angleData"];
+        for (rapidjson::SizeType i = 0; i < a.Size(); ++i)ad.push_back(a[i].GetDouble());
+    }
+    else if (doc.HasMember("pathData") && doc["pathData"].IsString()) {
+        for (char c : std::string(doc["pathData"].GetString())) {
+            auto it = pd.find(c); ad.push_back(it != pd.end() ? it->second : 0.0);
+        }
+    }
+
+    size_t n = ad.size() + 1;
+    std::vector<Tile> tiles(n);
+    if (doc.HasMember("settings")) {
+        const auto& st = doc["settings"];
+        tiles[0].stdbpm = st.HasMember("bpm") ? st["bpm"].GetDouble() : 100;
+        tiles[0].volume = st.HasMember("volume") ? st["volume"].GetDouble() : 100;
+    }
+    for (size_t i = 1; i < n; ++i)tiles[i] = Tile(ad[i - 1]);
+
+    if (doc.HasMember("actions") && doc["actions"].IsArray()) {
+        const auto& acts = doc["actions"];
+        for (rapidjson::SizeType i = 0; i < acts.Size(); ++i) {
+            const auto& a = acts[i];
+            if (!a.HasMember("floor") || !a.HasMember("eventType"))continue;
+            int fl = a["floor"].GetInt();
+            if (fl < 0 || fl >= (int)n - 1)continue;
+            Tile& t = tiles[(size_t)fl + 1];
+            std::string et = a["eventType"].GetString();
+            if (et == "SetSpeed") {
+                if (a.HasMember("speedType") && std::string(a["speedType"].GetString()) == "Bpm")
+                    t.stdbpm = a["beatsPerMinute"].GetDouble();
+                else if (a.HasMember("bpmMultiplier"))
+                    t.stdbpm = -a["bpmMultiplier"].GetDouble();
+                if (a.HasMember("angleOffset"))t.bpmangle = a["angleOffset"].GetDouble();
+            }
+            else if (et == "Twirl") {
+                t.twirl = true;
+            }
+            else if (et == "Pause") {
+                if (a.HasMember("duration"))t.pause = a["duration"].GetDouble();
+            }
+            else if (et == "Hold") {
+                t.hold = true; if (a.HasMember("duration"))t.pause += a["duration"].GetDouble() * 2;
+            }
+            else if (et == "SetHitsound") { if (a.HasMember("hitsoundVolume"))t.volume = a["hitsoundVolume"].GetDouble(); }
+        }
+    }
+    for (size_t i = 1; i < n; ++i)tiles[i].update(&tiles[i - 1]);
+    std::cout << "loaded " << n << " tiles\n";
+    return tiles;
+}
+
+// ── 合成（新方案：奈奎斯特过滤 + 静态等功率预缩放）───────
+static void generate(const std::vector<Tile>& tiles, const std::string& out_path)
+{
+    // hit.wav 路径
+    char exe[MAX_PATH]; GetModuleFileNameA(NULL, exe, MAX_PATH); PathRemoveFileSpecA(exe);
+    std::string wav_path = std::string(exe) + "\\hit.wav";
+
+    FILE* fp = fopen(wav_path.c_str(), "rb");
+    if (!fp) { std::cerr << "cannot find " << wav_path << '\n'; exit(1); }
+    char tmp4[4]; uint32_t u32;
+    (void)fread(tmp4, 1, 4, fp); (void)fread(&u32, 4, 1, fp); (void)fread(tmp4, 1, 4, fp);
+    uint16_t nch = 1; uint32_t sr = 44100; std::vector<int16_t> pcm;
+    while (true) {
+        char id[4]; uint32_t sz = 0;
+        if (fread(id, 1, 4, fp) != 4 || fread(&sz, 4, 1, fp) != 1)break;
+        if (!strncmp(id, "fmt ", 4)) {
+            uint16_t af = 1; uint32_t tr = std::min(sz, 8u);
+            if (tr >= 2)(void)fread(&af, 2, 1, fp);
+            if (tr >= 4)(void)fread(&nch, 2, 1, fp);
+            if (tr >= 8)(void)fread(&sr, 4, 1, fp);
+            fseek(fp, (long)sz - (long)tr, SEEK_CUR);
+        }
+        else if (!strncmp(id, "data", 4)) {
+            pcm.resize(sz / 2); (void)fread(pcm.data(), 1, sz, fp); break;
+        }
+        else fseek(fp, (long)sz, SEEK_CUR);
+    }
+    fclose(fp);
+    if (pcm.empty()) { std::cerr << "no PCM\n"; exit(1); }
+
+    // int16 → float, 去DC, 混单声道
+    std::vector<float> beat;
+    if (nch == 2) { for (size_t i = 0; i + 1 < pcm.size(); i += 2)beat.push_back(((float)pcm[i] + (float)pcm[i + 1]) * 0.5f / 32768.0f); }
+    else { for (auto v : pcm)beat.push_back((float)v / 32768.0f); }
+    float dc = 0; for (float v : beat)dc += v; dc /= (float)beat.size();
+    for (float& v : beat)v -= dc;
+
+    const size_t L = beat.size();
+
+    // ══════════════════════════════════════════════════════════
+    // 步骤 1：奈奎斯特过滤（丢弃间隔 < 1/24000 的 hit）
+    // ══════════════════════════════════════════════════════════
+    const double min_interval = 2.0 / sr;     // 1 / (sr/2)
+    double last_offset = -1e100;
+    size_t filtered_out = 0;
+
+    std::vector<int64_t> pins;
+    std::vector<float> vols;
+
+    for (size_t i = 1; i < tiles.size(); ++i) {
+        double offset = tiles[i].offset;
+        if (offset - last_offset < min_interval) {
+            ++filtered_out;
+            continue;          // 只丢弃，不移动时间戳
+        }
+        last_offset = offset;
+        pins.push_back((int64_t)(offset * (double)sr));
+        vols.push_back((float)(tiles[i].volume / 100.0));
+    }
+
+    if (pins.empty()) {
+        std::cerr << "all hits filtered out; no output\n";
+        return;
+    }
+    std::cout << "after Nyquist filter: " << pins.size()
+        << " hits (" << filtered_out << " removed)\n";
+
+    // ══════════════════════════════════════════════════════════
+    // 步骤 2：计算最大同时发声密度（差分数组，仅基于保留的 hit）
+    // ══════════════════════════════════════════════════════════
+    const int64_t total_len = pins.back() + (int64_t)L;
+    std::vector<int64_t> diff((size_t)total_len + 1, 0);
+
+    for (size_t i = 0; i < pins.size(); ++i) {
+        int64_t beg = pins[i];
+        int64_t end = std::min(beg + (int64_t)L, total_len);
+        diff[(size_t)beg] += 1;
+        diff[(size_t)end] -= 1;
+    }
+
+    int64_t cur = 0;
+    int64_t max_density = 0;
+    for (size_t i = 0; i < (size_t)total_len; ++i) {
+        cur += diff[i];
+        if (cur > max_density) max_density = cur;
+    }
+    std::cout << "max simultaneous hits (after filter): " << max_density << "\n";
+
+    if (max_density == 0) {
+        std::cerr << "no overlapping hits\n";
         return;
     }
 
-    if (tile.angle == 999.0) {
-        tile.midspin = true;
-        tile.angle = prev->angle - 180.0;
+    // ══════════════════════════════════════════════════════════
+    // 步骤 3：静态等功率预缩放（整个 hit 波形乘以同一常数）
+    // ══════════════════════════════════════════════════════════
+    const float pre_scale = 1.0f / std::sqrt((float)max_density);
+    std::vector<float> beat_scaled(L);
+    for (size_t i = 0; i < L; ++i)
+        beat_scaled[i] = beat[i] * pre_scale;
+
+    // 混音（double 累加）
+    std::vector<double> buf((size_t)total_len, 0.0);
+    for (size_t i = 0; i < pins.size(); ++i) {
+        int64_t p = pins[i];
+        float v = vols[i];
+        int64_t cnt = std::min((int64_t)L, total_len - p);
+        for (int64_t j = 0; j < cnt; ++j)
+            buf[p + j] += (double)beat_scaled[j] * v;
+        if ((i + 1) % std::max<size_t>(1, pins.size() / 50) == 0)
+            std::cout << "\rmixing " << (i + 1) * 100 / pins.size() << "%" << std::flush;
+    }
+    std::cout << "\n";
+
+    // double → float，并找出实际峰值
+    std::vector<float> out((size_t)total_len);
+    float peak = 0.0f;
+    for (size_t i = 0; i < (size_t)total_len; ++i) {
+        out[i] = (float)buf[i];
+        peak = std::max(peak, std::fabs(out[i]));
     }
 
-    double da = 180.0 - tile.angle + prev->angle;
-    if (da >= 360.0) da -= 360.0;
-    else if (da < 0.0) da += 360.0;
-    double deltaangle = da;
+    // ══════════════════════════════════════════════════════════
+    // 步骤 4：安全写入 int16（使用常数 safety gain + 饱和钳位）
+    // 不引入动态处理，只是避免极偶然的+0.1 dB过冲
+    // ══════════════════════════════════════════════════════════
+    const float safety_gain = 0.98f;   // 留约 0.2 dB 余量
+    // 如果实际峰值 × safety_gain > 1.0，则再用峰值归一化（但极少发生）
+    float final_scale = safety_gain;
+    if (peak * final_scale > 1.0f)
+        final_scale = 1.0f / peak;     // 安全兜底，仍为常数
 
-    tile.clock_wise = prev->clock_wise != tile.twirl;
+    // 写 WAV
+    uint32_t dsz = (uint32_t)std::min((int64_t)total_len * 2, (int64_t)UINT32_MAX);
+    uint32_t fsz = 36 + dsz, br = sr * 2, f16 = 16;
+    uint16_t af = 1, oc = 1, ba = 2, bp = 16;
+    std::ofstream wav(out_path, std::ios::binary);
+    wav.write("RIFF", 4); wav.write((char*)&fsz, 4); wav.write("WAVE", 4);
+    wav.write("fmt ", 4); wav.write((char*)&f16, 4);
+    wav.write((char*)&af, 2); wav.write((char*)&oc, 2); wav.write((char*)&sr, 4);
+    wav.write((char*)&br, 4); wav.write((char*)&ba, 2); wav.write((char*)&bp, 2);
+    wav.write("data", 4); wav.write((char*)&dsz, 4);
 
-    double angleoffset = tile.clock_wise
-        ? ((deltaangle == 0.0 && !tile.midspin) ? 360.0 : deltaangle)
-        : (tile.midspin ? 0.0 : (360.0 - deltaangle));
-
-    if (tile.stdbpm == 0.0) tile.stdbpm = prev->stdbpm;
-    else if (tile.stdbpm < 0.0) tile.stdbpm *= -prev->stdbpm;
-
-    if (tile.bpmangle > 0.0 && angleoffset > 0.0) {
-        tile.bpm = (tile.stdbpm * (angleoffset - tile.bpmangle) + prev->stdbpm * tile.bpmangle) / angleoffset;
+    for (float s : out) {
+        int32_t val = (int32_t)(s * final_scale * 32767.0f);
+        int16_t x = (int16_t)std::clamp(val, -32768, 32767);   // 饱和，不削波
+        wav.write((char*)&x, 2);
     }
-    else {
-        tile.bpm = tile.stdbpm;
-    }
-
-    double deltabeat = angleoffset / 180.0 + tile.pause;
-    double inv_bpm = 60.0 / tile.bpm;
-    tile.offset = prev->offset + deltabeat * inv_bpm * pitch_factor;
-    tile.beat = prev->beat + deltabeat;
-
-    if (tile.volume < 0.0) tile.volume = prev->volume;
+    std::cout << "done: " << out_path << "  (peak=" << peak << ")\n";
 }
 
-static std::string get_exe_directory() {
-    char path[MAX_PATH];
-    GetModuleFileNameA(NULL, path, MAX_PATH);
-    PathRemoveFileSpecA(path);
-    return std::string(path);
-}
+// ══════════════════════════════════════════════════════════════
+// ── 响度平衡后处理（动态加载 AudioLoudnorm.dll）────────────
+// ══════════════════════════════════════════════════════════════
 
-static std::pair<int, std::vector<float>> read_wav(const std::string& path) {
-    FILE* fp = nullptr;
-    fopen_s(&fp, path.c_str(), "rb");
-    if (!fp) throw std::runtime_error("Cannot open hit.wav");
+// 函数指针类型定义（匹配 AudioLoudnorm.h 的实际 API）
+struct LoudnormStats {
+    double integrated_loudness;
+    double loudness_range;
+    double true_peak;
+    double threshold;
+    double offset;
+};
 
-    char riff[4], wave[4];
-    uint32_t fsize;
-    fread(riff, 1, 4, fp);
-    fread(&fsize, 4, 1, fp);
-    fread(wave, 1, 4, fp);
+typedef void* (*LoudnormCreate)(int, int, double, double, double, int);
+typedef int   (*LoudnormProcess)(void*, const float*, int);
+typedef int   (*LoudnormGetOutput)(void*, float*, int);
+typedef int   (*LoudnormFlush)(void*, float*, int);
+typedef int   (*LoudnormGetStats)(void*, LoudnormStats*);
+typedef void  (*LoudnormDestroy)(void*);
+typedef const char* (*LoudnormVersion)();
 
-    int sample_rate = 0, channels = 0;
-    std::vector<float> audio;
+// 简易 WAV 数据结构
+struct WavData {
+    std::vector<float> samples;  // 交错：LRLRLR...
+    int sample_rate = 44100;
+    int channels = 1;
+    int64_t total_frames = 0;
+};
 
+static WavData read_wav_float(const std::string& path) {
+    FILE* fp = fopen(path.c_str(), "rb");
+    if (!fp) { std::cerr << "cannot open " << path << "\n"; return {}; }
+
+    char tmp4[4]; uint32_t u32;
+    fread(tmp4, 1, 4, fp); fread(&u32, 4, 1, fp); fread(tmp4, 1, 4, fp);
+
+    WavData w;
+    uint16_t bits = 16;
     while (true) {
-        char chunk_id[4] = { 0 };
-        uint32_t chunk_size = 0;
-        if (fread(chunk_id, 1, 4, fp) != 4) break;
-        fread(&chunk_size, 4, 1, fp);
-
-        if (strncmp(chunk_id, "fmt ", 4) == 0) {
-            uint16_t format, chan;
-            uint32_t sr;
-            uint16_t bps;
-            fread(&format, 2, 1, fp);
-            fread(&chan, 2, 1, fp);
-            channels = chan;
-            fread(&sr, 4, 1, fp);
-            sample_rate = static_cast<int>(sr);
-            fseek(fp, 6, SEEK_CUR);
-            fread(&bps, 2, 1, fp);
-            if (chunk_size > 16) fseek(fp, static_cast<long>(chunk_size) - 16, SEEK_CUR);
+        char id[4]; uint32_t sz = 0;
+        if (fread(id, 1, 4, fp) != 4 || fread(&sz, 4, 1, fp) != 1) break;
+        if (!strncmp(id, "fmt ", 4)) {
+            uint16_t af = 1;
+            uint32_t tr = std::min(sz, 8u);
+            if (tr >= 2) fread(&af, 2, 1, fp);
+            if (tr >= 4) fread(&w.channels, 2, 1, fp);
+            if (tr >= 8) fread(&w.sample_rate, 4, 1, fp);
+            if (tr >= 14)fread(&bits, 2, 1, fp);
+            fseek(fp, (long)sz - (long)tr, SEEK_CUR);
         }
-        else if (strncmp(chunk_id, "data", 4) == 0) {
-            std::vector<int16_t> raw(chunk_size / 2);
-            fread(raw.data(), 2, raw.size(), fp);
+        else if (!strncmp(id, "data", 4)) {
+            size_t n_samples = sz / (bits / 8);
+            w.samples.resize(n_samples);
 
-            audio.resize(raw.size() / channels);
-            if (channels == 1) {
-                for (size_t i = 0; i < audio.size(); ++i) {
-                    audio[i] = raw[i] / 32768.0f;
-                }
+            if (bits == 16) {
+                std::vector<int16_t> pcm(n_samples);
+                fread(pcm.data(), 1, sz, fp);
+                for (size_t i = 0; i < n_samples; ++i)
+                    w.samples[i] = pcm[i] / 32768.0f;
             }
-            else if (channels == 2) {
-                for (size_t i = 0; i < audio.size(); ++i) {
-                    float l = raw[2 * i] / 32768.0f;
-                    float r = raw[2 * i + 1] / 32768.0f;
-                    audio[i] = (l + r) * 0.5f;
+            else if (bits == 32) {
+                std::vector<int32_t> pcm(n_samples);
+                fread(pcm.data(), 1, sz, fp);
+                for (size_t i = 0; i < n_samples; ++i)
+                    w.samples[i] = pcm[i] / 2147483648.0f;
+            }
+            else if (bits == 24) {
+                for (size_t i = 0; i < n_samples; ++i) {
+                    unsigned char b[3];
+                    fread(b, 1, 3, fp);
+                    int32_t v = b[0] | (b[1] << 8) | (b[2] << 16);
+                    if (v & 0x800000) v |= 0xFF000000;
+                    w.samples[i] = v / 8388608.0f;
                 }
             }
             break;
         }
-        else {
-            fseek(fp, static_cast<long>(chunk_size), SEEK_CUR);
-        }
+        else fseek(fp, (long)sz, SEEK_CUR);
     }
     fclose(fp);
-    return { sample_rate, audio };
+    w.total_frames = w.samples.size() / w.channels;
+    return w;
 }
 
-static void write_wav(const std::string& path, int sr, const std::vector<int16_t>& data) {
-    FILE* fp = nullptr;
-    fopen_s(&fp, path.c_str(), "wb");
-    if (!fp) throw std::runtime_error("Cannot write output WAV");
+static void write_wav_float(const std::string& path, const float* samples,
+    int64_t total_frames, int sample_rate, int channels) {
+    std::ofstream wav(path, std::ios::binary);
+    uint32_t dsz = (uint32_t)(total_frames * channels * 2);
+    uint32_t fsz = 36 + dsz, br = sample_rate * channels * 2;
+    uint16_t f16 = 16, af = 1, oc = (uint16_t)channels, ba = (uint16_t)(channels * 2), bp = 16;
 
-    fwrite("RIFF", 1, 4, fp);
-    uint32_t filesize = 36 + static_cast<uint32_t>(data.size() * 2);
-    fwrite(&filesize, 4, 1, fp);
-    fwrite("WAVEfmt ", 1, 8, fp);
-    uint32_t fmt_size = 16;
-    fwrite(&fmt_size, 4, 1, fp);
-    uint16_t pcm = 1, chan = 1;
-    fwrite(&pcm, 2, 1, fp);
-    fwrite(&chan, 2, 1, fp);
-    fwrite(&sr, 4, 1, fp);
-    uint32_t byte_rate = static_cast<uint32_t>(sr) * 2;
-    fwrite(&byte_rate, 4, 1, fp);
-    uint16_t block = 2;
-    fwrite(&block, 2, 1, fp);
-    uint16_t bits = 16;
-    fwrite(&bits, 2, 1, fp);
-    fwrite("data", 1, 4, fp);
-    uint32_t data_size = static_cast<uint32_t>(data.size() * 2);
-    fwrite(&data_size, 4, 1, fp);
-    fwrite(data.data(), 2, data.size(), fp);
-    fclose(fp);
+    wav.write("RIFF", 4); wav.write((char*)&fsz, 4); wav.write("WAVE", 4);
+    wav.write("fmt ", 4); wav.write((char*)&f16, 4);
+    wav.write((char*)&af, 2); wav.write((char*)&oc, 2);
+    wav.write((char*)&sample_rate, 4); wav.write((char*)&br, 4);
+    wav.write((char*)&ba, 2); wav.write((char*)&bp, 2);
+    wav.write("data", 4); wav.write((char*)&dsz, 4);
+
+    for (int64_t i = 0; i < total_frames * channels; ++i) {
+        int32_t v = (int32_t)(samples[i] * 32767.0f);
+        int16_t x = (int16_t)std::clamp(v, -32768, 32767);
+        wav.write((char*)&x, 2);
+    }
 }
 
-static std::vector<float> pitch_shift(const std::vector<float>& input, double factor) {
-    if (factor == 1.0) return input;
-    int new_len = static_cast<int>(input.size() / factor);
-    std::vector<float> output(new_len);
-    for (int i = 0; i < new_len; ++i) {
-        double src_idx = i * factor;
-        int idx0 = static_cast<int>(src_idx);
-        int idx1 = std::min(idx0 + 1, static_cast<int>(input.size()) - 1);
-        float frac = static_cast<float>(src_idx - idx0);
-        output[i] = input[idx0] * (1.0f - frac) + input[idx1] * frac;
+static bool loudnorm_process_file(const std::string& in_path,
+    const std::string& out_path,
+    double target_lufs = -23.0) {
+    // 加载 DLL
+    HMODULE hDll = LoadLibraryA("AudioLoudnorm.dll");
+    if (!hDll) {
+        char exe[MAX_PATH];
+        GetModuleFileNameA(NULL, exe, MAX_PATH);
+        PathRemoveFileSpecA(exe);
+        std::string dll_path = std::string(exe) + "\\AudioLoudnorm.dll";
+        hDll = LoadLibraryA(dll_path.c_str());
     }
-    return output;
+    if (!hDll) {
+        std::cerr << "Cannot load AudioLoudnorm.dll\n";
+        std::cerr << "Make sure all 5 DLLs are in the same directory as the .exe\n";
+        return false;
+    }
+
+    auto pCreate = (LoudnormCreate)GetProcAddress(hDll, "Loudnorm_Create");
+    auto pProcess = (LoudnormProcess)GetProcAddress(hDll, "Loudnorm_Process");
+    auto pGetOutput = (LoudnormGetOutput)GetProcAddress(hDll, "Loudnorm_GetOutput");
+    auto pFlush = (LoudnormFlush)GetProcAddress(hDll, "Loudnorm_Flush");
+    auto pGetStats = (LoudnormGetStats)GetProcAddress(hDll, "Loudnorm_GetStats");
+    auto pDestroy = (LoudnormDestroy)GetProcAddress(hDll, "Loudnorm_Destroy");
+    auto pVersion = (LoudnormVersion)GetProcAddress(hDll, "Loudnorm_Version");
+
+    if (!pCreate || !pProcess || !pGetOutput || !pFlush || !pDestroy) {
+        std::cerr << "Failed to get function pointers\n";
+        FreeLibrary(hDll);
+        return false;
+    }
+
+    std::cout << "AudioLoudnorm version: " << pVersion() << "\n";
+
+    WavData wav = read_wav_float(in_path);
+    if (wav.samples.empty()) {
+        FreeLibrary(hDll);
+        return false;
+    }
+
+    std::cout << "Input: " << wav.sample_rate << " Hz, "
+        << wav.channels << " ch, "
+        << wav.total_frames << " frames\n";
+
+    // 创建 session（6 个参数）
+    double target_lra = 7.0;    // EBU R128 默认
+    double target_tp = -2.0;   // EBU R128 默认
+    int linear_mode = 0;      // 0 = 动态模式
+
+    void* session = pCreate(
+        wav.sample_rate,
+        wav.channels,
+        target_lufs,
+        target_lra,
+        target_tp,
+        linear_mode
+    );
+    if (!session) {
+        std::cerr << "Failed to create loudnorm session\n";
+        FreeLibrary(hDll);
+        return false;
+    }
+
+    // 处理音频（交错数据，一次性传入）
+    int ret = pProcess(session, wav.samples.data(), (int)wav.total_frames);
+    if (ret < 0) {
+        std::cerr << "Loudnorm_Process failed (err=" << ret << ")\n";
+        pDestroy(session);
+        FreeLibrary(hDll);
+        return false;
+    }
+    std::cout << "Processed " << ret << " frames\n";
+
+    // 获取输出（先 Flush 取剩余，再 GetOutput 取全部）
+    std::vector<float> output_all(wav.samples.size());
+    int got = pFlush(session, output_all.data(), (int)wav.total_frames);
+    if (got <= 0) {
+        got = pGetOutput(session, output_all.data(), (int)wav.total_frames);
+    }
+    if (got <= 0) {
+        std::cerr << "Failed to get output samples\n";
+        pDestroy(session);
+        FreeLibrary(hDll);
+        return false;
+    }
+
+    int64_t out_frames = got;
+    output_all.resize(out_frames * wav.channels);
+    std::cout << "Output: " << out_frames << " frames\n";
+
+    // 获取统计信息
+    LoudnormStats stats = {};
+    if (pGetStats && pGetStats(session, &stats) == 0) {
+        std::cout << "Loudnorm stats:\n"
+            << "  Integrated: " << stats.integrated_loudness << " LUFS\n"
+            << "  Range:      " << stats.loudness_range << " LU\n"
+            << "  True Peak:  " << stats.true_peak << " dBTP\n"
+            << "  Threshold:  " << stats.threshold << " LUFS\n"
+            << "  Offset:     " << stats.offset << " dB\n";
+    }
+
+    write_wav_float(out_path, output_all.data(), out_frames,
+        wav.sample_rate, wav.channels);
+
+    std::cout << "Output: " << out_path << " (" << out_frames << " frames)\n";
+
+    pDestroy(session);
+    FreeLibrary(hDll);
+    return true;
 }
 
-static void print_progress(size_t cur, size_t total, const std::string& prefix) {
-    if (total == 0) return;
-    int percent = static_cast<int>(100.0 * cur / total);
-    size_t filled = 80 * cur / total;
-    std::string bar(80, '-');
-    std::fill(bar.begin(), bar.begin() + filled, '#');
-    printf("\r%s %s %d%%", prefix.c_str(), bar.c_str(), percent);
-    fflush(stdout);
-    if (cur == total) printf("\n");
-}
+// ── main ─────────────────────────────────────────────────────
+int main()
+{
+    SetConsoleOutputCP(CP_UTF8); SetConsoleCP(CP_UTF8);
 
-static std::vector<Tile> load_adofai(const std::string& path) {
-    auto start = std::chrono::high_resolution_clock::now();
+    std::cout << "===============================================\n";
+    std::cout << "  ADOFAI HitSound Generator\n";
+    std::cout << "  Github: https://github.com/Maicy0609\n";
+    std::cout << "  Repo:   https://github.com/Maicy0609/ADOFAI_HitSound\n";
+    std::cout << "  Bilibili: https://space.bilibili.com/630056484\n";
+    std::cout << "===============================================\n\n";
 
-    FILE* fp = nullptr;
-    fopen_s(&fp, path.c_str(), "rb");
-    if (!fp) throw std::runtime_error("Cannot open .adofai");
-    fseek(fp, 0, SEEK_END);
-    long fsize = ftell(fp);
-    fseek(fp, 0, SEEK_SET);
-    std::string content(static_cast<size_t>(fsize), '\0');
-    fread(&content[0], 1, static_cast<size_t>(fsize), fp);
-    fclose(fp);
-
-    size_t start_offset = 0;
-    if (content.size() >= 3 && static_cast<uint8_t>(content[0]) == 0xEF &&
-        static_cast<uint8_t>(content[1]) == 0xBB && static_cast<uint8_t>(content[2]) == 0xBF) {
-        start_offset = 3;
-    }
-
-    rapidjson::Document doc;
-    doc.ParseInsitu<rapidjson::kParseTrailingCommasFlag>(const_cast<char*>(content.data() + start_offset));
-    if (doc.HasParseError()) {
-        throw std::runtime_error(rapidjson::GetParseError_En(doc.GetParseError()));
-    }
-
-    double init_bpm = doc["settings"]["bpm"].GetDouble();
-    double init_volume = doc["settings"].HasMember("volume") ? doc["settings"]["volume"].GetDouble() : 100.0;
-
-    std::unordered_map<char, double> path_map = {
-        {'R',0},{'p',15},{'J',30},{'E',45},{'T',60},{'o',75},{'U',90},{'q',105},
-        {'G',120},{'Q',135},{'H',150},{'W',165},{'L',180},{'x',195},{'N',210},
-        {'Z',225},{'F',240},{'V',255},{'D',270},{'Y',285},{'B',300},{'C',315},
-        {'M',330},{'A',345},{'5',555},{'6',666},{'7',777},{'8',888},{'!',999}
-    };
-
-    std::vector<double> angles;
-    if (doc.HasMember("angleData")) {
-        const auto& arr = doc["angleData"];
-        for (rapidjson::SizeType i = 0; i < arr.Size(); ++i) {
-            angles.push_back(arr[i].GetDouble());
-        }
-    }
-    else {
-        std::string pd = doc["pathData"].GetString();
-        for (char c : pd) {
-            auto it = path_map.find(c);
-            angles.push_back(it != path_map.end() ? it->second : 0.0);
-        }
-    }
-
-    size_t n_tiles = angles.size() + 1;
-    std::vector<Tile> tiles(n_tiles);
-    tiles[0].stdbpm = init_bpm;
-    tiles[0].volume = init_volume;
-
-    std::cout << "\n读取谱面数据...\n";
-    for (size_t i = 0; i < angles.size(); ++i) {
-        tiles[i + 1].angle = angles[i];
-        if ((i + 1) % std::max<size_t>(1, angles.size() / 20) == 0) {
-            print_progress(i + 1, angles.size(), "读取进度:");
-        }
-    }
-    print_progress(angles.size(), angles.size(), "读取进度:");
-
-    std::cout << "处理事件...\n";
-    size_t total_actions = doc.HasMember("actions") ? doc["actions"].Size() : 0;
-    for (size_t i = 0; i < total_actions; ++i) {
-        const auto& act = doc["actions"][static_cast<rapidjson::SizeType>(i)];
-        int64_t floor = act.HasMember("floor") ? act["floor"].GetInt64() : -1;
-        if (floor >= 0 && static_cast<size_t>(floor + 1) < n_tiles) {
-            Tile& t = tiles[static_cast<size_t>(floor) + 1];
-            std::string et = act["eventType"].GetString();
-            if (et == "SetSpeed") {
-                std::string stype = act["speedType"].GetString();
-                if (stype == "Bpm") {
-                    t.stdbpm = act["beatsPerMinute"].GetDouble();
-                }
-                else {
-                    t.stdbpm = -act["bpmMultiplier"].GetDouble();
-                }
-                t.bpmangle = act.HasMember("angleOffset") ? act["angleOffset"].GetDouble() : 0.0;
-            }
-            else if (et == "Twirl") t.twirl = true;
-            else if (et == "Pause") t.pause = act["duration"].GetDouble();
-            else if (et == "Hold") {
-                t.hold = true;
-                t.pause += act["duration"].GetDouble() * 2.0;
-            }
-            else if (et == "SetHitsound") t.volume = act["hitsoundVolume"].GetDouble();
-        }
-        if ((i + 1) % std::max<size_t>(1, total_actions / 20) == 0) {
-            print_progress(i + 1, total_actions, "事件进度:");
-        }
-    }
-    if (total_actions > 0) print_progress(total_actions, total_actions, "事件进度:");
-
-    std::cout << "计算时间轴...\n";
-    Tile_update(tiles[0], nullptr, 1.0);
-    for (size_t i = 1; i < n_tiles; ++i) {
-        Tile_update(tiles[i], &tiles[i - 1], 1.0);
-        if (i % std::max<size_t>(1, n_tiles / 20) == 0) {
-            print_progress(i, n_tiles, "计算进度:");
-        }
-    }
-    print_progress(n_tiles, n_tiles, "计算进度:");
-
-    auto dur = std::chrono::duration<double>(std::chrono::high_resolution_clock::now() - start).count();
-    printf("\n谱面加载完成，用时 %.3f 秒\n", dur);
-
-    return tiles;
-}
-
-static void generate_hitsound(const std::vector<Tile>& tiles, const std::string& out_path, int pitch) {
-    _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
-
-    auto start = std::chrono::high_resolution_clock::now();
-
-    std::string hit_path = get_exe_directory() + "\\hit.wav";
-    auto [hit_sr, original_beat] = read_wav(hit_path);
-
-    float peak = 0.0f;
-    for (float v : original_beat) peak = std::max(peak, std::abs(v));
-    if (peak > 0.0f) {
-        for (float& v : original_beat) v /= peak;
-    }
-
-    int base_pitch = (pitch <= 37) ? 25 : (pitch <= 75) ? 50 : (pitch <= 150) ? 100 : 200;
-    double shift_factor = 100.0 / base_pitch;
-    std::vector<float> hit_beat = pitch_shift(original_beat, shift_factor);
-
-    
-
-    size_t n = tiles.size() - 1;
-    std::vector<double> offsets(n);
-    std::vector<float> volumes(n);
-    for (size_t i = 0; i < n; ++i) {
-        offsets[i] = tiles[i + 1].offset;
-        volumes[i] = static_cast<float>(tiles[i + 1].volume / 100.0);
-    }
-
-    std::vector<int64_t> pins(n);
-    for (size_t i = 0; i < n; ++i) {
-        pins[i] = static_cast<int64_t>(offsets[i] * hit_sr);  // 恢复原始写法
-    }
-
-    size_t L = hit_beat.size();
-    int64_t total64 = pins.back() + static_cast<int64_t>(L);
-    size_t total_samples = static_cast<size_t>(std::max<int64_t>(total64, 0));
-    std::vector<float> output(total_samples, 0.0f);
-
-    std::cout << "合成 WAV...\n";
-    for (size_t i = 0; i < n; ++i) {
-        int64_t start_pos = pins[i];
-        if (start_pos < 0) continue;
-        float vol = volumes[i];
-        size_t len = std::min(L, total_samples - static_cast<size_t>(start_pos));
-        for (size_t j = 0; j < len; ++j) {
-            output[static_cast<size_t>(start_pos) + j] += hit_beat[j] * vol;
-        }
-        if ((i + 1) % std::max<size_t>(1, n / 20) == 0) {
-            print_progress(i + 1, n, "合成进度:");
-        }
-    }
-    print_progress(n, n, "合成进度:");
-
-    peak = 0.0f;
-    for (float v : output) peak = std::max(peak, std::abs(v));
-    if (peak > 1.0f) {
-        for (float& v : output) v /= peak;
-    }
-
-    std::vector<int16_t> out16(total_samples);
-    for (size_t i = 0; i < total_samples; ++i) {
-        float v = output[i] * 32767.0f;
-        if (v >= 32767.0f) out16[i] = 32767;
-        else if (v <= -32768.0f) out16[i] = -32768;
-        else out16[i] = static_cast<int16_t>(v + (v >= 0.0f ? 0.5f : -0.5f));
-    }
-
-    write_wav(out_path, hit_sr, out16);
-
-    auto dur = std::chrono::duration<double>(std::chrono::high_resolution_clock::now() - start).count();
-    printf("\n合成完成，用时 %.3f 秒\n", dur);
-}
-
-int main() {
     std::string path;
-    std::cout << "请输入 .adofai 文件路径: ";
-    std::getline(std::cin, path);
+    std::cout << "adofai path: "; std::getline(std::cin, path);
     if (!path.empty() && path.front() == '"') path.erase(0, 1);
     if (!path.empty() && path.back() == '"') path.pop_back();
 
-    int pitch = 100;
-    std::string pitch_str;
-    std::cout << "请输入音高(默认100): ";
-    std::getline(std::cin, pitch_str);
-    if (!pitch_str.empty()) pitch = std::stoi(pitch_str);
-
     auto tiles = load_adofai(path);
+    std::string out = path.substr(0, path.find_last_of('.')) + ".wav";
+    generate(tiles, out);
 
-    size_t dot = path.find_last_of('.');
-    std::string base = (dot != std::string::npos) ? path.substr(0, dot) : path;
-    std::string out_path = base + "_p" + std::to_string(pitch) + ".wav";
+    // ── 询问是否进行响度平衡 ─────────────────────────────
+    std::cout << "\n========================================\n";
+    std::cout << "Apply loudness normalization? (y/n): ";
+    char choice;
+    std::cin >> choice;
+    std::cin.ignore();
 
-    generate_hitsound(tiles, out_path, pitch);
+    if (choice == 'y' || choice == 'Y') {
+        double target = -23.0;
+        std::cout << "Target LUFS (default -23.0 = EBU R128): ";
+        std::string input;
+        std::getline(std::cin, input);
+        if (!input.empty()) target = std::stod(input);
 
-    std::cout << "\n完成: " << out_path << "\n";
-    std::cout << "Press Enter to exit...";
-    std::getchar();
-    return 0;
+        std::string norm_out = path.substr(0, path.find_last_of('.')) + "_norm.wav";
+        std::cout << "Output: " << norm_out << "\n";
+
+        if (loudnorm_process_file(out, norm_out, target)) {
+            std::cout << "Loudness normalization complete!\n";
+        }
+        else {
+            std::cout << "Normalization failed. Raw file saved as " << out << "\n";
+        }
+    }
+
+    std::cout << "press enter..."; std::cin.get();
 }

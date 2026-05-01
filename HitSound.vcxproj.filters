@@ -19,4 +19,21 @@
       <Filter>源文件</Filter>
     </ClCompile>
   </ItemGroup>
+  <ItemGroup>
+    <None Include="x64\Release\AudioLoudnorm.dll">
+      <Filter>资源文件</Filter>
+    </None>
+    <None Include="x64\Release\avcodec-62.dll">
+      <Filter>资源文件</Filter>
+    </None>
+    <None Include="x64\Release\avfilter-11.dll">
+      <Filter>资源文件</Filter>
+    </None>
+    <None Include="x64\Release\avutil-60.dll">
+      <Filter>资源文件</Filter>
+    </None>
+    <None Include="x64\Release\swresample-6.dll">
+      <Filter>资源文件</Filter>
+    </None>
+  </ItemGroup>
 </Project>
