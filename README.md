@@ -54,7 +54,7 @@ cl /std:c++17 /O2 /arch:AVX2 /EHsc HitSound.cpp /I./rapidjson
 
 ## 测试谱面
 
-[Tempest.adofai](https://github.com/Maicy0609/ADOFAI_HitSound/raw/main/x64/Release/Tempest.adofai) — 互联网收集，仅供性能测试。
+[Tempest.adofai](https://github.com/Maicy0609/ADOFAI_HitSound/raw/main/x64/Release/Tempest.adofai) — 作者 @StArray 仅供性能测试。
 
 - 158,403 tiles
 - 153,414 hits（过滤后）
