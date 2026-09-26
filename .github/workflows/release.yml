@@ -92,23 +92,38 @@ jobs:
       # ── 打包 ────────────────────────────────────────────────────────────
       - name: 打包
         shell: bash
+        env:
+          PYTHONUTF8: '1'
+          TAG: ${{ inputs.tag }}
+          NAME: ${{ matrix.name }}
+          PKG: ${{ matrix.pkg }}
         run: |
           set -e
-          TAG="${{ inputs.tag }}"
-          DIR="dist/HitSound-${TAG}-${{ matrix.name }}"
+          PY=$(command -v python3 || command -v python)
+          DIR="dist/HitSound-${TAG}-${NAME}"
           mkdir -p "$DIR"
           BIN=HitSound
           [ -f HitSound.exe ] && BIN=HitSound.exe
           cp "$BIN" "$DIR/"
           cp x64/Release/hit.wav "$DIR/"
           cp README.md THIRD-PARTY-NOTICES.md LICENSE "$DIR/"
-          cd dist
-          if [ "${{ matrix.pkg }}" = "zip" ]; then
-            zip -q -r "HitSound-${TAG}-${{ matrix.name }}.zip" "HitSound-${TAG}-${{ matrix.name }}"
-          else
-            tar czf "HitSound-${TAG}-${{ matrix.name }}.tar.gz" "HitSound-${TAG}-${{ matrix.name }}"
-          fi
-          ls -la
+          # 用 python 打包：Windows runner 上没有 zip/7z，这样三平台一套逻辑
+          "$PY" - <<'PY'
+          import os, tarfile, zipfile
+          tag, name, kind = os.environ["TAG"], os.environ["NAME"], os.environ["PKG"]
+          d = f"dist/HitSound-{tag}-{name}"
+          root = f"HitSound-{tag}-{name}"
+          if kind == "zip":
+              with zipfile.ZipFile(f"{d}.zip", "w", zipfile.ZIP_DEFLATED) as z:
+                  for f in sorted(os.listdir(d)):
+                      z.write(os.path.join(d, f), arcname=f"{root}/{f}")
+              print("打包:", f"{d}.zip")
+          else:
+              with tarfile.open(f"{d}.tar.gz", "w:gz") as t:
+                  t.add(d, arcname=root)      # tarfile 会保留可执行位
+              print("打包:", f"{d}.tar.gz")
+          PY
+          ls -la dist
 
       - uses: actions/upload-artifact@v4
         with:
