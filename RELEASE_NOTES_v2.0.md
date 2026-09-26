@@ -47,12 +47,19 @@
 把谱面的歌曲偏移（毫秒）叠加到所有击打时间上，输出音轨可以直接铺在从 0 播放的歌曲上；
 `offset = 0` 的谱面行为与旧版**逐字节一致**。需要旧行为用 `--no-offset`。
 
+### 5. 新增 `--no-nyquist`：可关闭奈奎斯特过滤
+
+默认仍启用过滤（丢弃间隔 < 41.7 µs @48k 的重复 hit，避免堆叠成糊墙）；加 `--no-nyquist`
+则**保留谱面上的每一个击打**。关掉后最大同时发声数变大，`1/√N` 静态等功率预缩放会自动
+跟着调整，不会削波。极密谱面差异很大（某 6.77M tiles 压测关卡：开 = 57 万 hits，关 = 677 万 hits）。
+
 ## 用法
 
 ```bash
 HitSound                  # 交互式：提示输入 .adofai 路径
 HitSound /path/to/hit.wav # 指定打击音样本
 HitSound --no-offset      # 不叠加 settings.offset
+HitSound --no-nyquist     # 关闭奈奎斯特过滤，保留全部击打
 ```
 
 输出 WAV 与谱面同目录、同名；按 `y` 可再做 EBU R128 响度平衡，输出 `<谱面名>_norm.wav`。

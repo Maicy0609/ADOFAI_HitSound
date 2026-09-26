@@ -177,7 +177,8 @@ jobs:
           fi
           [ "${{ inputs.prerelease }}" = "true" ] && ARGS+=(--prerelease)
           if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release $TAG 已存在 → 上传/覆盖产物"
+            echo "Release $TAG 已存在 → 更新说明并覆盖产物"
+            [ -f "$NOTES" ] && gh release edit "$TAG" --notes-file "$NOTES" || true
             gh release upload "$TAG" dist/* --clobber
           else
             gh release create "$TAG" dist/* "${ARGS[@]}"
