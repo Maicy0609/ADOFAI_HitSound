@@ -85,8 +85,12 @@ static std::string executable_dir()
     return dir.empty() ? std::string() : dir + "/";
 }
 
-// hit.wav 路径（可由命令行第一个参数覆盖；空 = 自动查找）
+// hit.wav 路径（可由命令行参数覆盖；空 = 自动查找）
 static std::string g_hit_wav;
+
+// 是否把 settings.offset（歌曲偏移）叠加到击打时间上：默认开启，
+// 命令行加 --no-offset 关闭。offset = 0 时两者完全等价。
+static bool g_apply_offset = true;
 
 // ── Tile ─────────────────────────────────────────────────────
 struct Tile {
@@ -98,8 +102,11 @@ struct Tile {
     void update(const Tile* p) {
         if (p) {
             if (angle == 999.0) { midspin = true; angle = p->angle - 180.0; }
-            double da = 180.0 - angle + p->angle;
-            if (da >= 360)da -= 360; else if (da < 0)da += 360;
+            // 归一化必须取模：angleData 可能带负数 / 大于 360 的值，而 999 中旋还会把前一值
+            // 改写成 -180，于是 180 - angle + prev 可能落在 [-472.5, 832.5]，一次 if 加减修不
+            // 回来 —— 会把旋转量算小（实测某压测关卡整段因此少 11.935 s）。
+            double da = fmod(180.0 - angle + p->angle, 360.0);
+            if (da < 0)da += 360.0;
             cw = p->cw ^ (twirl ? 1 : 0);
             double ao = cw ? ((da == 0 && !midspin) ? 360 : da) : (midspin ? 0 : (360 - da));
             if (stdbpm < 0 && p->stdbpm>0) stdbpm = -stdbpm * p->stdbpm;
@@ -152,10 +159,15 @@ static std::vector<Tile> load_adofai(const std::string& path)
 
     size_t n = ad.size() + 1;
     std::vector<Tile> tiles(n);
+    double song_offset = 0.0;                       // settings.offset，单位秒
     if (doc.HasMember("settings")) {
         const auto& st = doc["settings"];
         tiles[0].stdbpm = st.HasMember("bpm") ? st["bpm"].GetDouble() : 100;
         tiles[0].volume = st.HasMember("volume") ? st["volume"].GetDouble() : 100;
+        // settings.offset：歌曲相对关卡起点的偏移（毫秒）。默认把它叠加到所有击打时间上，
+        // 输出音轨就能直接铺在从 0 播放的歌曲上（与 ADOCO / ADOFAI-JS 的口径一致）。
+        if (g_apply_offset && st.HasMember("offset"))
+            song_offset = st["offset"].GetDouble() / 1000.0;
     }
     for (size_t i = 1; i < n; ++i)tiles[i] = Tile(ad[i - 1]);
 
@@ -188,6 +200,13 @@ static std::vector<Tile> load_adofai(const std::string& path)
         }
     }
     for (size_t i = 1; i < n; ++i)tiles[i].update(&tiles[i - 1]);
+
+    if (song_offset != 0.0) {
+        for (size_t i = 1; i < n; ++i)tiles[i].offset += song_offset;
+        std::cout << "settings.offset = " << song_offset * 1000.0
+                  << " ms: 击打时间已整体平移（加 --no-offset 可关闭）\n";
+    }
+
     std::cout << "loaded " << n << " tiles\n";
     return tiles;
 }
@@ -256,6 +275,10 @@ static void generate(const std::vector<Tile>& tiles, const std::string& out_path
 
     for (size_t i = 1; i < tiles.size(); ++i) {
         double offset = tiles[i].offset;
+        if (offset < 0) {      // offset 为负时可能有击打落在歌曲 0 之前，铺不上，直接丢
+            ++filtered_out;
+            continue;
+        }
         if (offset - last_offset < min_interval) {
             ++filtered_out;
             continue;          // 只丢弃，不移动时间戳
@@ -532,8 +555,13 @@ int main(int argc, char** argv)
 #ifdef _WIN32
     SetConsoleOutputCP(CP_UTF8); SetConsoleCP(CP_UTF8);   // Windows 控制台转 UTF-8
 #endif
-    // 可选：第一个参数直接指定 hit.wav（Linux/macOS 上没有双击运行，命令行更顺手）
-    if (argc > 1 && argv[1][0] != '\0') g_hit_wav = argv[1];
+    // 命令行参数（都可选）：--no-offset 关闭 settings.offset 平移；其余参数当作 hit.wav 路径
+    // （Linux/macOS 上没有双击运行，命令行更顺手）
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg = argv[i] ? argv[i] : "";
+        if (arg == "--no-offset") { g_apply_offset = false; continue; }
+        if (!arg.empty()) g_hit_wav = arg;
+    }
 
     std::cout << "===============================================\n";
     std::cout << "  ADOFAI HitSound Generator\n";
