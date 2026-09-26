@@ -1,0 +1,163 @@
+name: release
+
+# 手动触发：三平台构建 + 打包装到同一个 Release（tag 由输入决定，默认 v2.0）。
+# 刻意不加 push/tag 自动触发：改代码或推 tag 不该自动发版。
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '发布 tag（会创建同名 Release；同名 tag 已存在则更新该 Release 的产物）'
+        default: 'v2.0'
+        required: true
+      prerelease:
+        description: '标记为预发布'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: windows-x64,     os: windows-latest, pkg: zip }
+          - { name: linux-x64,       os: ubuntu-latest,  pkg: tar.gz }
+          - { name: macos-universal, os: macos-latest,   pkg: tar.gz }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+
+      # ── 编译 ────────────────────────────────────────────────────────────
+      - name: 编译（Windows / MSVC，静态运行库）
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          cl /nologo /std:c++17 /O2 /MT /EHsc /utf-8 HitSound.cpp ^
+             third_party\ebur128\ebur128.c /Ithird_party\ebur128 /D_USE_MATH_DEFINES /Fe:HitSound.exe
+          dir HitSound.exe
+
+      - name: 编译（Linux / GCC，静态链接，兼容老发行版）
+        if: runner.os == 'Linux'
+        run: |
+          gcc -O2 -Ithird_party/ebur128 -c third_party/ebur128/ebur128.c -o ebur128.o
+          g++ -std=c++17 -O2 -static -o HitSound HitSound.cpp ebur128.o -lm
+          strip HitSound || true
+          ls -la HitSound
+
+      - name: 编译（macOS / clang，universal：x86_64 + arm64）
+        if: runner.os == 'macOS'
+        run: |
+          clang -O2 -arch x86_64 -arch arm64 -Ithird_party/ebur128 \
+                -c third_party/ebur128/ebur128.c -o ebur128.o
+          clang++ -std=c++17 -O2 -arch x86_64 -arch arm64 \
+                  -o HitSound HitSound.cpp ebur128.o
+          strip HitSound || true
+          lipo -info HitSound
+
+      # ── 冒烟测试：编出来的东西真能跑 ────────────────────────────────────
+      - name: 冒烟测试（生成小关卡 → 合成 → 校验 WAV）
+        shell: bash
+        env:
+          PYTHONUTF8: '1'
+        run: |
+          set -e
+          PY=$(command -v python3 || command -v python)
+          BIN=HitSound
+          [ -f HitSound.exe ] && BIN=HitSound.exe
+          "$PY" - <<'PY'
+          import json
+          json.dump({"settings": {"version": 15, "song": "smoke", "bpm": 120.0, "offset": 250.0,
+                                  "hitsound": "Kick", "hitsoundVolume": 100.0, "zoom": 100.0},
+                     "angleData": [0, 90, 180, 270, 0, 90, 180, 45, 315, 200, 60],
+                     "actions": [{"floor": 3, "eventType": "Twirl"}],
+                     "decorations": []}, open("smoke.adofai", "w"))
+          PY
+          printf 'smoke.adofai\nn\n' | "./$BIN"
+          "$PY" - <<'PY'
+          import wave
+          w = wave.open("smoke.wav")
+          print("smoke.wav:", w.getnchannels(), "ch", w.getframerate(), "Hz", w.getnframes(), "frames")
+          assert w.getnchannels() == 1 and w.getframerate() == 48000 and w.getnframes() > 0
+          w.close()
+          PY
+
+      # ── 打包 ────────────────────────────────────────────────────────────
+      - name: 打包
+        shell: bash
+        run: |
+          set -e
+          TAG="${{ inputs.tag }}"
+          DIR="dist/HitSound-${TAG}-${{ matrix.name }}"
+          mkdir -p "$DIR"
+          BIN=HitSound
+          [ -f HitSound.exe ] && BIN=HitSound.exe
+          cp "$BIN" "$DIR/"
+          cp x64/Release/hit.wav "$DIR/"
+          cp README.md THIRD-PARTY-NOTICES.md LICENSE "$DIR/"
+          cd dist
+          if [ "${{ matrix.pkg }}" = "zip" ]; then
+            zip -q -r "HitSound-${TAG}-${{ matrix.name }}.zip" "HitSound-${TAG}-${{ matrix.name }}"
+          else
+            tar czf "HitSound-${TAG}-${{ matrix.name }}.tar.gz" "HitSound-${TAG}-${{ matrix.name }}"
+          fi
+          ls -la
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pkg-${{ matrix.name }}
+          path: dist/*.zip
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - uses: actions/upload-artifact@v4
+        if: runner.os != 'Windows'
+        with:
+          name: pkg-${{ matrix.name }}
+          path: dist/*.tar.gz
+          retention-days: 7
+
+  release:
+    name: 创建 Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: pkg-*
+          merge-multiple: true
+          path: dist
+
+      - name: 发布
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -e
+          ls -la dist
+          NOTES="RELEASE_NOTES_${TAG}.md"
+          ARGS=(--title "ADOFAI HitSound ${TAG}")
+          if [ -f "$NOTES" ]; then
+            ARGS+=(--notes-file "$NOTES")
+          else
+            ARGS+=(--generate-notes)
+            echo "（没有 $NOTES，改用 --generate-notes）"
+          fi
+          [ "${{ inputs.prerelease }}" = "true" ] && ARGS+=(--prerelease)
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG 已存在 → 上传/覆盖产物"
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* "${ARGS[@]}"
+          fi
+          gh release view "$TAG" --json tagName,name,isDraft,isPrerelease,assets \
+            -q '"\(.tagName)  \(.name)  draft=\(.isDraft)  prerelease=\(.isPrerelease)", (.assets[] | "  \(.name)  \(.size/1024|floor) KB")'
