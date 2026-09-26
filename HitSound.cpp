@@ -92,6 +92,11 @@ static std::string g_hit_wav;
 // 命令行加 --no-offset 关闭。offset = 0 时两者完全等价。
 static bool g_apply_offset = true;
 
+// 是否启用奈奎斯特过滤（丢弃间隔 < 1/(sr/2) 的重复 hit）：默认开启，
+// 命令行加 --no-nyquist 关闭。关掉后所有 hit 都参与混音，
+// 最大同时发声数（进而 1/√N 预缩放）也会跟着变。
+static bool g_nyquist = true;
+
 // ── Tile ─────────────────────────────────────────────────────
 struct Tile {
     double angle = 0, bpm = -1, stdbpm = -1, bpmangle = 0, pause = 0, offset = 0, beat = 0, volume = -1;
@@ -270,7 +275,9 @@ static void generate(const std::vector<Tile>& tiles, const std::string& out_path
     // ══════════════════════════════════════════════════════════
     // 步骤 1：奈奎斯特过滤（丢弃间隔 < 1/24000 的 hit）
     // ══════════════════════════════════════════════════════════
-    const double min_interval = 2.0 / sr;     // 1 / (sr/2)
+    // 奈奎斯特过滤：丢弃间隔小于 1/(sr/2)（约 41.7 µs @48k）的重复 hit。
+    // 关掉时 min_interval = 0，`offset - last_offset < 0` 恒不成立 → 一个都不丢。
+    const double min_interval = g_nyquist ? 2.0 / sr : 0.0;
     double last_offset = -1e100;
     size_t filtered_out = 0;
 
@@ -296,8 +303,8 @@ static void generate(const std::vector<Tile>& tiles, const std::string& out_path
         std::cerr << "all hits filtered out; no output\n";
         return;
     }
-    std::cout << "after Nyquist filter: " << pins.size()
-        << " hits (" << filtered_out << " removed)\n";
+    std::cout << (g_nyquist ? "after Nyquist filter: " : "Nyquist filter off: ")
+        << pins.size() << " hits (" << filtered_out << " removed)\n";
 
     // ══════════════════════════════════════════════════════════
     // 步骤 2：计算最大同时发声密度（差分数组，仅基于保留的 hit）
@@ -559,11 +566,12 @@ int main(int argc, char** argv)
 #ifdef _WIN32
     SetConsoleOutputCP(CP_UTF8); SetConsoleCP(CP_UTF8);   // Windows 控制台转 UTF-8
 #endif
-    // 命令行参数（都可选）：--no-offset 关闭 settings.offset 平移；其余参数当作 hit.wav 路径
-    // （Linux/macOS 上没有双击运行，命令行更顺手）
+    // 命令行参数（都可选）：--no-offset 关闭 settings.offset 平移；--no-nyquist 关闭奈奎斯特过滤；
+    // 其余参数当作 hit.wav 路径（Linux/macOS 上没有双击运行，命令行更顺手）
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i] ? argv[i] : "";
-        if (arg == "--no-offset") { g_apply_offset = false; continue; }
+        if (arg == "--no-offset")  { g_apply_offset = false; continue; }
+        if (arg == "--no-nyquist") { g_nyquist = false; continue; }
         if (!arg.empty()) g_hit_wav = arg;
     }
 
