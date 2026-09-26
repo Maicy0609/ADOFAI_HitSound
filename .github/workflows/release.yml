@@ -55,12 +55,17 @@ jobs:
       - name: 编译（macOS / clang，universal：x86_64 + arm64）
         if: runner.os == 'macOS'
         run: |
-          clang -O2 -arch x86_64 -arch arm64 -Ithird_party/ebur128 \
-                -c third_party/ebur128/ebur128.c -o ebur128.o
-          clang++ -std=c++17 -O2 -arch x86_64 -arch arm64 \
-                  -o HitSound HitSound.cpp ebur128.o
+          # -mmacosx-version-min：不指定的话，runner 的 SDK（26.x）会把最低系统顶到 macOS 26，
+          # 那样几乎没人跑得起来；这里明确压到 macOS 11（Big Sur，arm64 Mac 的起点）。
+          FLAGS="-O2 -mmacosx-version-min=11.0 -arch x86_64 -arch arm64"
+          clang $FLAGS -Ithird_party/ebur128 -c third_party/ebur128/ebur128.c -o ebur128.o
+          clang++ -std=c++17 $FLAGS -o HitSound HitSound.cpp ebur128.o
           strip HitSound || true
           lipo -info HitSound
+          # 复核最低系统版本（写进日志，便于以后核对）
+          for a in x86_64 arm64; do
+            echo -n "  $a: "; otool -l HitSound 2>/dev/null | grep -A3 LC_BUILD_VERSION | grep -m1 minos || echo "?"
+          done
 
       # ── 冒烟测试：编出来的东西真能跑 ────────────────────────────────────
       - name: 冒烟测试（生成小关卡 → 合成 → 校验 WAV）
