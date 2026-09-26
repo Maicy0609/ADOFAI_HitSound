@@ -26,15 +26,18 @@
 
 ### 响度归一化（可选）
 
-如需对输出 WAV 进行 EBU R128 响度平衡，请将以下 5 个 DLL 与 exe 同目录放置：
+启动时按 `y` 启用，默认目标 **-23.0 LUFS**（EBU R128）。**不需要任何外部 DLL**：
+响度测量用的是直接编进程序里的 FFmpeg `libavfilter/ebur128.c`（见 `third_party/ffmpeg/`，
+出处与许可证见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)）。
 
-- `AudioLoudnorm.dll`
-- `avutil-60.dll`
-- `swresample-6.dll`
-- `avfilter-11.dll`
-- `avcodec-62.dll`
+做的事就是 FFmpeg `loudnorm` 滤镜的 linear（常数增益）模式：
 
-> 启动时按 `y` 即可启用，默认目标 -23.0 LUFS。
+1. 测整轨的综合响度 `I`（LUFS）与采样峰值；
+2. `gain = -23 − I`，若 `峰值 + gain` 超过 -2 dBTP 就把增益压到峰值上限；
+3. 用同一个常数增益缩放全轨（不做动态 AGC，避免 pumping）。
+
+> 峰值上限用的是**采样峰值**而不是真峰值：采样峰值恒 ≤ 真峰值，所以这个上限偏保守，
+> 不会过冲（FFmpeg 的 loudnorm 能报真峰值是另外走了一套 libswresample 上采样，这里不引入）。
 
 ## 特性
 
@@ -47,10 +50,27 @@
 
 ## 编译
 
+MSVC（Windows）：
+
 ```bash
-cl /std:c++17 /O2 /arch:AVX2 /EHsc HitSound.cpp /I./rapidjson
+cl /std:c++17 /O2 /EHsc HitSound.cpp ^
+   third_party\ffmpeg\ebur128\ebur128.c /D_USE_MATH_DEFINES
 ```
-依赖：[RapidJSON](https://github.com/Tencent/rapidjson)（header-only，放入 `rapidjson/` 目录即可）
+
+GCC / Clang（Linux、macOS，或 Windows 上的 MinGW）：
+
+```bash
+gcc -O2 -c third_party/ffmpeg/ebur128/ebur128.c -o ebur128.o
+g++ -std=c++17 -O2 -o HitSound HitSound.cpp ebur128.o -lm
+```
+
+依赖：全部随仓库提供，不需要额外安装（出处与许可证见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)）
+
+- [RapidJSON](https://github.com/Tencent/rapidjson)（MIT，`rapidjson/` 目录）
+- FFmpeg 的 `libavfilter/ebur128.c`（EBU R128 响度测量，LGPL-2.1+，`third_party/ffmpeg/` 目录）
+
+程序按「命令行参数 → 可执行文件同目录 → 当前目录 → `x64/Release/`」的顺序找 `hit.wav`，
+也可以直接把路径当第一个参数传进去：`./HitSound /path/to/hit.wav`。
 
 ## 测试谱面
 

@@ -132,6 +132,11 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="HitSound.cpp" />
+    <!-- FFmpeg 的 EBU R128 实现（原样引入，见 THIRD-PARTY-NOTICES.md）。
+         ebur128.c 用到 M_PI，MSVC 下需要 _USE_MATH_DEFINES。 -->
+    <ClCompile Include="third_party\ffmpeg\ebur128\ebur128.c">
+      <PreprocessorDefinitions>_USE_MATH_DEFINES;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <None Include="x64\Release\AudioLoudnorm.dll" />

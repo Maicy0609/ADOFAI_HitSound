@@ -1,26 +1,91 @@
-﻿// HitSound.cpp — MSVC2022 C++17
-// cl /std:c++17 /O2 /arch:AVX2 /EHsc HitSound.cpp /I./rapidjson
+﻿// HitSound.cpp — C++17，GCC / Clang / MSVC 通用
+//
+//   Windows (MSVC):
+//     cl /std:c++17 /O2 /EHsc HitSound.cpp third_party\ffmpeg\ebur128\ebur128.c /D_USE_MATH_DEFINES
+//   Linux / macOS:
+//     gcc -O2 -c third_party/ffmpeg/ebur128/ebur128.c -o ebur128.o
+//     g++ -std=c++17 -O2 -o HitSound HitSound.cpp ebur128.o -lm
+//
+// 第三方组件（出处与许可证见 THIRD-PARTY-NOTICES.md）：
+//   - rapidjson   MIT        ./rapidjson/
+//   - FFmpeg 的 libavfilter/ebur128.c（EBU R128 响度测量）  LGPL-2.1+  ./third_party/ffmpeg/
 
-#define NOMINMAX
-#define _CRT_SECURE_NO_WARNINGS
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-#include <shlwapi.h>
-#pragma comment(lib, "shlwapi.lib")
+#ifdef _MSC_VER
+#  define _CRT_SECURE_NO_WARNINGS
+#  pragma warning(push)
+#  pragma warning(disable: 4996)
+#endif
+#ifdef _WIN32
+#  define NOMINMAX
+#  define WIN32_LEAN_AND_MEAN
+#  include <windows.h>            /* 只在 Windows 用到：取自身路径 / 控制台代码页 */
+#endif
 
-#include <iostream>
-#include <fstream>
-#include <vector>
-#include <string>
-#include <unordered_map>
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <fstream>
+#include <iostream>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
-#pragma warning(push)
-#pragma warning(disable: 4996)
+#ifdef __APPLE__
+#  include <mach-o/dyld.h>
+#endif
+#ifdef __linux__
+#  include <unistd.h>
+#endif
+
 #include "rapidjson/document.h"
-#pragma warning(pop)
+
+// third_party/ffmpeg/ebur128/ 下的两个文件与上游 release/9.0 逐字节相同（未做任何改动），
+// 只有编译期需要这里包一层 extern "C"：ebur128.c 按 C 编译，符号名不经 C++ 改编。
+extern "C" {
+#include "third_party/ffmpeg/ebur128/ebur128.h"
+}
+
+#ifdef _MSC_VER
+#  pragma warning(pop)
+#endif
+
+// ── 可执行文件所在目录（跨平台等价实现）──────────────────────
+// 上游用 GetModuleFileNameA + PathRemoveFileSpecA（Windows 专属）。这里按平台
+// 各取一次「自身路径」再截到目录；取不到就返回空串，调用方会退回当前工作目录。
+static std::string executable_dir()
+{
+#ifdef _WIN32
+    char buf[MAX_PATH];
+    DWORD n = GetModuleFileNameA(nullptr, buf, MAX_PATH);
+    const char* path = (n > 0 && n < MAX_PATH) ? buf : nullptr;
+#elif defined(__APPLE__)
+    uint32_t size = 0;
+    _NSGetExecutablePath(nullptr, &size);                 // 先问需要多大缓冲
+    std::vector<char> tmp(size > 0 ? size : 1);
+    const char* path = (_NSGetExecutablePath(tmp.data(), &size) == 0) ? tmp.data() : nullptr;
+#elif defined(__linux__)
+    char buf[4096];
+    ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    const char* path = nullptr;
+    if (n > 0) { buf[n] = '\0'; path = buf; }
+#else
+    const char* path = nullptr;
+#endif
+    std::string dir;
+    if (path) {
+        dir = path;
+        const size_t slash = dir.find_last_of("/\\");
+        if (slash != std::string::npos) dir.erase(slash);   // 去掉文件名
+        else                            dir.clear();        // 只有裸文件名 → 无法定位
+    }
+    return dir.empty() ? std::string() : dir + "/";
+}
+
+// hit.wav 路径（可由命令行第一个参数覆盖；空 = 自动查找）
+static std::string g_hit_wav;
 
 // ── Tile ─────────────────────────────────────────────────────
 struct Tile {
@@ -129,9 +194,22 @@ static std::vector<Tile> load_adofai(const std::string& path)
 // ── 合成（新方案：奈奎斯特过滤 + 静态等功率预缩放）───────
 static void generate(const std::vector<Tile>& tiles, const std::string& out_path)
 {
-    // hit.wav 路径
-    char exe[MAX_PATH]; GetModuleFileNameA(NULL, exe, MAX_PATH); PathRemoveFileSpecA(exe);
-    std::string wav_path = std::string(exe) + "\\hit.wav";
+    // hit.wav 路径：命令行指定 > 可执行文件同目录 > 当前目录 > 源码树里的 x64/Release
+    std::string wav_path = g_hit_wav;
+    if (wav_path.empty()) {
+        const std::string dir = executable_dir();
+        const std::string candidates[] = {
+            dir + "hit.wav", "hit.wav", "x64/Release/hit.wav",
+        };
+        for (const std::string& c : candidates) {
+            if (c.empty()) continue;
+            FILE* probe = fopen(c.c_str(), "rb");
+            if (probe) { fclose(probe); wav_path = c; break; }
+        }
+        if (wav_path.empty()) wav_path = dir + "hit.wav";   // 都没找到：按 exe 同目录报错
+        else if (wav_path != dir + "hit.wav")
+            std::cout << "using hit.wav: " << wav_path << "\n";
+    }
 
     FILE* fp = fopen(wav_path.c_str(), "rb");
     if (!fp) { std::cerr << "cannot find " << wav_path << '\n'; exit(1); }
@@ -278,25 +356,58 @@ static void generate(const std::vector<Tile>& tiles, const std::string& out_path
 }
 
 // ══════════════════════════════════════════════════════════════
-// ── 响度平衡后处理（动态加载 AudioLoudnorm.dll）────────────
 // ══════════════════════════════════════════════════════════════
+// ── 响度平衡后处理（内置 EBU R128，无外部 DLL）────────────────
+// ══════════════════════════════════════════════════════════════
+//
+// 上游版本动态加载 AudioLoudnorm.dll（Windows 专属，还要额外 5 个 DLL）。
+// 现在把 FFmpeg 的 libavfilter/ebur128.c 直接编进程序做测量（third_party/ffmpeg/，
+// LGPL-2.1+，见 THIRD-PARTY-NOTICES.md），再用「常数增益」应用，
+// 等价于 FFmpeg loudnorm 滤镜的 linear 模式：
+//
+//   gain = target_lufs - I                                       ← 综合响度对齐
+//   若 peak_db + gain > target_tp → gain = target_tp - peak_db    ← 峰值上限
+//
+// 两点说明：
+//   * 离线预渲染用常数增益，不做动态 AGC（动态模式会 pumping）；
+//   * 峰值用 ebur128 提供的 sample peak 代替 true peak。采样峰值恒 ≤ 真峰值，
+//     所以这个上限偏保守（宁可多留余量，不会过冲）。FFmpeg 的 loudnorm 滤镜能报
+//     真峰值是因为它另外走了一套 libswresample 上采样，这里不引入那份依赖。
 
-// 函数指针类型定义（匹配 AudioLoudnorm.h 的实际 API）
-struct LoudnormStats {
-    double integrated_loudness;
-    double loudness_range;
-    double true_peak;
-    double threshold;
-    double offset;
+struct LoudnessStats {
+    double integrated;   // 综合响度 LUFS
+    double range;        // 响度范围 LU
+    double peak_db;      // 采样峰值 dBFS
+    double gain_db;      // 实际施加的增益 dB
 };
 
-typedef void* (*LoudnormCreate)(int, int, double, double, double, int);
-typedef int   (*LoudnormProcess)(void*, const float*, int);
-typedef int   (*LoudnormGetOutput)(void*, float*, int);
-typedef int   (*LoudnormFlush)(void*, float*, int);
-typedef int   (*LoudnormGetStats)(void*, LoudnormStats*);
-typedef void  (*LoudnormDestroy)(void*);
-typedef const char* (*LoudnormVersion)();
+static bool measure_loudness(const std::vector<float>& samples, int sr, int ch,
+                             LoudnessStats* out)
+{
+    FFEBUR128State* st = ff_ebur128_init((unsigned)ch, (unsigned long)sr, 0 /*auto window*/,
+                                         FF_EBUR128_MODE_I | FF_EBUR128_MODE_LRA |
+                                         FF_EBUR128_MODE_SAMPLE_PEAK);
+    if (!st) return false;
+    if (ch == 1) ff_ebur128_set_channel(st, 0, FF_EBUR128_CENTER);  // 单声道按中置计权
+
+    std::vector<double> buf(samples.size());
+    for (size_t i = 0; i < samples.size(); ++i) buf[i] = (double)samples[i];
+    ff_ebur128_add_frames_double(st, buf.data(), samples.size() / (size_t)ch);
+
+    out->integrated = -HUGE_VAL;
+    out->range      = -HUGE_VAL;
+    out->peak_db    = -HUGE_VAL;
+    ff_ebur128_loudness_global(st, &out->integrated);
+    ff_ebur128_loudness_range(st, &out->range);
+    for (int c = 0; c < ch; ++c) {
+        double pk = 0.0;
+        if (ff_ebur128_sample_peak(st, (unsigned)c, &pk) == 0 && pk > 0.0)
+            out->peak_db = std::max(out->peak_db, 20.0 * std::log10(pk));
+    }
+    ff_ebur128_destroy(&st);
+
+    return std::isfinite(out->integrated);      // 全静音等异常 → 视为测量失败
+}
 
 // 简易 WAV 数据结构
 struct WavData {
@@ -366,7 +477,10 @@ static void write_wav_float(const std::string& path, const float* samples,
     std::ofstream wav(path, std::ios::binary);
     uint32_t dsz = (uint32_t)(total_frames * channels * 2);
     uint32_t fsz = 36 + dsz, br = sample_rate * channels * 2;
-    uint16_t f16 = 16, af = 1, oc = (uint16_t)channels, ba = (uint16_t)(channels * 2), bp = 16;
+    uint32_t f16 = 16;                       // WAV 的 fmt 块长度字段是 4 字节（上游误声明为
+                                             // uint16_t，写 4 字节会越界读到相邻变量：MSVC 侥幸
+                                             // 补零，GCC 下会变成 0x00010010，_norm.wav 直接解不开）
+    uint16_t af = 1, oc = (uint16_t)channels, ba = (uint16_t)(channels * 2), bp = 16;
 
     wav.write("RIFF", 4); wav.write((char*)&fsz, 4); wav.write("WAVE", 4);
     wav.write("fmt ", 4); wav.write((char*)&f16, 4);
@@ -383,120 +497,45 @@ static void write_wav_float(const std::string& path, const float* samples,
 }
 
 static bool loudnorm_process_file(const std::string& in_path,
-    const std::string& out_path,
-    double target_lufs = -23.0) {
-    // 加载 DLL
-    HMODULE hDll = LoadLibraryA("AudioLoudnorm.dll");
-    if (!hDll) {
-        char exe[MAX_PATH];
-        GetModuleFileNameA(NULL, exe, MAX_PATH);
-        PathRemoveFileSpecA(exe);
-        std::string dll_path = std::string(exe) + "\\AudioLoudnorm.dll";
-        hDll = LoadLibraryA(dll_path.c_str());
-    }
-    if (!hDll) {
-        std::cerr << "Cannot load AudioLoudnorm.dll\n";
-        std::cerr << "Make sure all 5 DLLs are in the same directory as the .exe\n";
-        return false;
-    }
-
-    auto pCreate = (LoudnormCreate)GetProcAddress(hDll, "Loudnorm_Create");
-    auto pProcess = (LoudnormProcess)GetProcAddress(hDll, "Loudnorm_Process");
-    auto pGetOutput = (LoudnormGetOutput)GetProcAddress(hDll, "Loudnorm_GetOutput");
-    auto pFlush = (LoudnormFlush)GetProcAddress(hDll, "Loudnorm_Flush");
-    auto pGetStats = (LoudnormGetStats)GetProcAddress(hDll, "Loudnorm_GetStats");
-    auto pDestroy = (LoudnormDestroy)GetProcAddress(hDll, "Loudnorm_Destroy");
-    auto pVersion = (LoudnormVersion)GetProcAddress(hDll, "Loudnorm_Version");
-
-    if (!pCreate || !pProcess || !pGetOutput || !pFlush || !pDestroy) {
-        std::cerr << "Failed to get function pointers\n";
-        FreeLibrary(hDll);
-        return false;
-    }
-
-    std::cout << "AudioLoudnorm version: " << pVersion() << "\n";
-
+                                  const std::string& out_path,
+                                  double target_lufs = -23.0,
+                                  double target_tp = -2.0)
+{
     WavData wav = read_wav_float(in_path);
-    if (wav.samples.empty()) {
-        FreeLibrary(hDll);
+    if (wav.samples.empty()) return false;
+
+    LoudnessStats m = {};
+    if (!measure_loudness(wav.samples, wav.sample_rate, wav.channels, &m)) {
+        std::cerr << "loudnorm: measurement failed (silent input?)\n";
         return false;
     }
 
-    std::cout << "Input: " << wav.sample_rate << " Hz, "
-        << wav.channels << " ch, "
-        << wav.total_frames << " frames\n";
+    m.gain_db = target_lufs - m.integrated;
+    if (m.peak_db + m.gain_db > target_tp)      // 峰值上限（保守：采样峰值）
+        m.gain_db = target_tp - m.peak_db;
 
-    // 创建 session（6 个参数）
-    double target_lra = 7.0;    // EBU R128 默认
-    double target_tp = -2.0;   // EBU R128 默认
-    int linear_mode = 0;      // 0 = 动态模式
+    std::cout << "loudnorm: integrated " << m.integrated << " LUFS, LRA " << m.range
+              << " LU, sample peak " << m.peak_db << " dBFS -> gain " << m.gain_db
+              << " dB (target " << target_lufs << " LUFS / " << target_tp << " dBTP)\n";
 
-    void* session = pCreate(
-        wav.sample_rate,
-        wav.channels,
-        target_lufs,
-        target_lra,
-        target_tp,
-        linear_mode
-    );
-    if (!session) {
-        std::cerr << "Failed to create loudnorm session\n";
-        FreeLibrary(hDll);
-        return false;
-    }
+    const double gain = std::pow(10.0, m.gain_db / 20.0);
+    for (float& s : wav.samples)
+        s = (float)std::clamp((double)s * gain, -1.0, 1.0);
 
-    // 处理音频（交错数据，一次性传入）
-    int ret = pProcess(session, wav.samples.data(), (int)wav.total_frames);
-    if (ret < 0) {
-        std::cerr << "Loudnorm_Process failed (err=" << ret << ")\n";
-        pDestroy(session);
-        FreeLibrary(hDll);
-        return false;
-    }
-    std::cout << "Processed " << ret << " frames\n";
-
-    // 获取输出（先 Flush 取剩余，再 GetOutput 取全部）
-    std::vector<float> output_all(wav.samples.size());
-    int got = pFlush(session, output_all.data(), (int)wav.total_frames);
-    if (got <= 0) {
-        got = pGetOutput(session, output_all.data(), (int)wav.total_frames);
-    }
-    if (got <= 0) {
-        std::cerr << "Failed to get output samples\n";
-        pDestroy(session);
-        FreeLibrary(hDll);
-        return false;
-    }
-
-    int64_t out_frames = got;
-    output_all.resize(out_frames * wav.channels);
-    std::cout << "Output: " << out_frames << " frames\n";
-
-    // 获取统计信息
-    LoudnormStats stats = {};
-    if (pGetStats && pGetStats(session, &stats) == 0) {
-        std::cout << "Loudnorm stats:\n"
-            << "  Integrated: " << stats.integrated_loudness << " LUFS\n"
-            << "  Range:      " << stats.loudness_range << " LU\n"
-            << "  True Peak:  " << stats.true_peak << " dBTP\n"
-            << "  Threshold:  " << stats.threshold << " LUFS\n"
-            << "  Offset:     " << stats.offset << " dB\n";
-    }
-
-    write_wav_float(out_path, output_all.data(), out_frames,
-        wav.sample_rate, wav.channels);
-
-    std::cout << "Output: " << out_path << " (" << out_frames << " frames)\n";
-
-    pDestroy(session);
-    FreeLibrary(hDll);
+    write_wav_float(out_path, wav.samples.data(), wav.total_frames,
+                    wav.sample_rate, wav.channels);
+    std::cout << "Output: " << out_path << " (" << wav.total_frames << " frames)\n";
     return true;
 }
 
 // ── main ─────────────────────────────────────────────────────
-int main()
+int main(int argc, char** argv)
 {
-    SetConsoleOutputCP(CP_UTF8); SetConsoleCP(CP_UTF8);
+#ifdef _WIN32
+    SetConsoleOutputCP(CP_UTF8); SetConsoleCP(CP_UTF8);   // Windows 控制台转 UTF-8
+#endif
+    // 可选：第一个参数直接指定 hit.wav（Linux/macOS 上没有双击运行，命令行更顺手）
+    if (argc > 1 && argv[1][0] != '\0') g_hit_wav = argv[1];
 
     std::cout << "===============================================\n";
     std::cout << "  ADOFAI HitSound Generator\n";
