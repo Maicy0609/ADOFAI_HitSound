@@ -24,9 +24,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: windows-x64,     os: windows-latest, pkg: zip }
-          - { name: linux-x64,       os: ubuntu-latest,  pkg: tar.gz }
-          - { name: macos-universal, os: macos-latest,   pkg: tar.gz }
+          - { name: windows-x64,     os: windows-latest,   pkg: zip }
+          - { name: linux-x64,       os: ubuntu-latest,    pkg: tar.gz }
+          - { name: linux-arm64,     os: ubuntu-24.04-arm, pkg: tar.gz }
+          - { name: macos-universal, os: macos-latest,     pkg: tar.gz }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
@@ -44,12 +45,14 @@ jobs:
              third_party\ebur128\ebur128.c /Ithird_party\ebur128 /D_USE_MATH_DEFINES /Fe:HitSound.exe
           dir HitSound.exe
 
-      - name: 编译（Linux / GCC，静态链接，兼容老发行版）
+      - name: 编译（Linux / GCC，静态链接，兼容老发行版；x64 与 arm64 同一套命令）
         if: runner.os == 'Linux'
         run: |
+          echo "runner arch: $(uname -m)"
           gcc -O2 -Ithird_party/ebur128 -c third_party/ebur128/ebur128.c -o ebur128.o
           g++ -std=c++17 -O2 -static -o HitSound HitSound.cpp ebur128.o -lm
           strip HitSound || true
+          file HitSound
           ls -la HitSound
 
       - name: 编译（macOS / clang，universal：x86_64 + arm64）

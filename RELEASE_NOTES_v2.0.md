@@ -8,7 +8,8 @@
 | --- | --- |
 | Windows x64 | `HitSound-v2.0-windows-x64.zip` |
 | Linux x64（静态链接，不挑发行版） | `HitSound-v2.0-linux-x64.tar.gz` |
-| macOS（universal：Intel + Apple Silicon） | `HitSound-v2.0-macos-universal.tar.gz` |
+| Linux arm64（静态链接，树莓派 / ARM 服务器 / Apple Silicon 虚拟机） | `HitSound-v2.0-linux-arm64.tar.gz` |
+| macOS（universal：Intel + Apple Silicon，最低 macOS 11） | `HitSound-v2.0-macos-universal.tar.gz` |
 
 每个包里都有可执行文件、`hit.wav`、README、许可证与第三方声明。
 

@@ -47,6 +47,7 @@
 | --- | --- |
 | Windows x64 | `HitSound-v2.0-windows-x64.zip` |
 | Linux x64（静态链接） | `HitSound-v2.0-linux-x64.tar.gz` |
+| Linux arm64（静态链接） | `HitSound-v2.0-linux-arm64.tar.gz` |
 | macOS（Intel + Apple Silicon 通用） | `HitSound-v2.0-macos-universal.tar.gz` |
 
 每个包里都带上了 `hit.wav`，解压即用。发布日期见 [Releases](https://github.com/Maicy0609/ADOFAI_HitSound/releases) 页面。
