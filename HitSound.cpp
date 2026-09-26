@@ -184,7 +184,11 @@ static std::vector<Tile> load_adofai(const std::string& path)
                 if (a.HasMember("speedType") && std::string(a["speedType"].GetString()) == "Bpm")
                     t.stdbpm = a["beatsPerMinute"].GetDouble();
                 else if (a.HasMember("bpmMultiplier"))
-                    t.stdbpm = -a["bpmMultiplier"].GetDouble();
+                    // 乘数与已有值连乘，而不是覆盖：
+                    //   同一 floor 上既有绝对 Bpm 又有乘数时（本仓库某压测关卡就有），
+                    //   乘数应作用在新的绝对 BPM 上（8 千 ×2），旧写法会覆盖成「上一 tile ×2」；
+                    //   同一 floor 多个乘数事件也应连乘。
+                    t.stdbpm *= a["bpmMultiplier"].GetDouble();
                 if (a.HasMember("angleOffset"))t.bpmangle = a["angleOffset"].GetDouble();
             }
             else if (et == "Twirl") {
