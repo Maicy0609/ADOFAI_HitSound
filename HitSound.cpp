@@ -1,14 +1,15 @@
 ﻿// HitSound.cpp — C++17，GCC / Clang / MSVC 通用
 //
 //   Windows (MSVC):
-//     cl /std:c++17 /O2 /EHsc HitSound.cpp third_party\ffmpeg\ebur128\ebur128.c /D_USE_MATH_DEFINES
+//     cl /std:c++17 /O2 /EHsc HitSound.cpp third_party\ebur128\ebur128.c ^
+//        /Ithird_party\ebur128 /D_USE_MATH_DEFINES
 //   Linux / macOS:
-//     gcc -O2 -c third_party/ffmpeg/ebur128/ebur128.c -o ebur128.o
+//     gcc -O2 -Ithird_party/ebur128 -c third_party/ebur128/ebur128.c -o ebur128.o
 //     g++ -std=c++17 -O2 -o HitSound HitSound.cpp ebur128.o -lm
 //
 // 第三方组件（出处与许可证见 THIRD-PARTY-NOTICES.md）：
-//   - rapidjson   MIT        ./rapidjson/
-//   - FFmpeg 的 libavfilter/ebur128.c（EBU R128 响度测量）  LGPL-2.1+  ./third_party/ffmpeg/
+//   - rapidjson    MIT  ./rapidjson/
+//   - libebur128   MIT  ./third_party/ebur128/（EBU R128 响度测量，含真峰值）
 
 #ifdef _MSC_VER
 #  define _CRT_SECURE_NO_WARNINGS
@@ -42,10 +43,10 @@
 
 #include "rapidjson/document.h"
 
-// third_party/ffmpeg/ebur128/ 下的两个文件与上游 release/9.0 逐字节相同（未做任何改动），
+// third_party/ebur128/ 下的两个文件与上游 v1.2.6 逐字节相同（未做任何改动），
 // 只有编译期需要这里包一层 extern "C"：ebur128.c 按 C 编译，符号名不经 C++ 改编。
 extern "C" {
-#include "third_party/ffmpeg/ebur128/ebur128.h"
+#include "third_party/ebur128/ebur128.h"
 }
 
 #ifdef _MSC_VER
@@ -361,50 +362,47 @@ static void generate(const std::vector<Tile>& tiles, const std::string& out_path
 // ══════════════════════════════════════════════════════════════
 //
 // 上游版本动态加载 AudioLoudnorm.dll（Windows 专属，还要额外 5 个 DLL）。
-// 现在把 FFmpeg 的 libavfilter/ebur128.c 直接编进程序做测量（third_party/ffmpeg/，
-// LGPL-2.1+，见 THIRD-PARTY-NOTICES.md），再用「常数增益」应用，
-// 等价于 FFmpeg loudnorm 滤镜的 linear 模式：
+// 现在把 MIT 许可的 libebur128 直接编进程序做测量（third_party/ebur128/，见
+// THIRD-PARTY-NOTICES.md），再用「常数增益」应用，等价于 FFmpeg loudnorm 滤镜的
+// linear 模式：
 //
-//   gain = target_lufs - I                                       ← 综合响度对齐
-//   若 peak_db + gain > target_tp → gain = target_tp - peak_db    ← 峰值上限
+//   gain = target_lufs - I                                         ← 综合响度对齐
+//   若 true_peak + gain > target_tp → gain = target_tp - true_peak  ← 真峰值上限
 //
-// 两点说明：
-//   * 离线预渲染用常数增益，不做动态 AGC（动态模式会 pumping）；
-//   * 峰值用 ebur128 提供的 sample peak 代替 true peak。采样峰值恒 ≤ 真峰值，
-//     所以这个上限偏保守（宁可多留余量，不会过冲）。FFmpeg 的 loudnorm 滤镜能报
-//     真峰值是因为它另外走了一套 libswresample 上采样，这里不引入那份依赖。
+// 说明：离线预渲染用常数增益，不做动态 AGC（动态模式会 pumping）。libebur128 自带
+// 真峰值测量（内部 4 倍过采样 FIR，不依赖 libswresample），所以这里直接用真峰值做
+// 上限，与 FFmpeg loudnorm 的口径一致。
 
 struct LoudnessStats {
-    double integrated;   // 综合响度 LUFS
-    double range;        // 响度范围 LU
-    double peak_db;      // 采样峰值 dBFS
-    double gain_db;      // 实际施加的增益 dB
+    double integrated;      // 综合响度 LUFS
+    double range;           // 响度范围 LU
+    double true_peak_db;    // 真峰值 dBTP
+    double gain_db;         // 实际施加的增益 dB
 };
 
 static bool measure_loudness(const std::vector<float>& samples, int sr, int ch,
                              LoudnessStats* out)
 {
-    FFEBUR128State* st = ff_ebur128_init((unsigned)ch, (unsigned long)sr, 0 /*auto window*/,
-                                         FF_EBUR128_MODE_I | FF_EBUR128_MODE_LRA |
-                                         FF_EBUR128_MODE_SAMPLE_PEAK);
+    ebur128_state* st = ebur128_init((unsigned)ch, (unsigned long)sr,
+                                     EBUR128_MODE_I | EBUR128_MODE_LRA | EBUR128_MODE_TRUE_PEAK);
     if (!st) return false;
-    if (ch == 1) ff_ebur128_set_channel(st, 0, FF_EBUR128_CENTER);  // 单声道按中置计权
+    if (ch == 1) ebur128_set_channel(st, 0, EBUR128_CENTER);   // 单声道按中置计权
 
     std::vector<double> buf(samples.size());
     for (size_t i = 0; i < samples.size(); ++i) buf[i] = (double)samples[i];
-    ff_ebur128_add_frames_double(st, buf.data(), samples.size() / (size_t)ch);
+    ebur128_add_frames_double(st, buf.data(), samples.size() / (size_t)ch);
 
-    out->integrated = -HUGE_VAL;
-    out->range      = -HUGE_VAL;
-    out->peak_db    = -HUGE_VAL;
-    ff_ebur128_loudness_global(st, &out->integrated);
-    ff_ebur128_loudness_range(st, &out->range);
+    out->integrated   = -HUGE_VAL;
+    out->range        = -HUGE_VAL;
+    out->true_peak_db = -HUGE_VAL;
+    ebur128_loudness_global(st, &out->integrated);
+    ebur128_loudness_range(st, &out->range);
     for (int c = 0; c < ch; ++c) {
-        double pk = 0.0;
-        if (ff_ebur128_sample_peak(st, (unsigned)c, &pk) == 0 && pk > 0.0)
-            out->peak_db = std::max(out->peak_db, 20.0 * std::log10(pk));
+        double tp = 0.0;                        // libebur128 返回线性值，1.0 = 0 dBTP
+        if (ebur128_true_peak(st, (unsigned)c, &tp) == EBUR128_SUCCESS && tp > 0.0)
+            out->true_peak_db = std::max(out->true_peak_db, 20.0 * std::log10(tp));
     }
-    ff_ebur128_destroy(&st);
+    ebur128_destroy(&st);
 
     return std::isfinite(out->integrated);      // 全静音等异常 → 视为测量失败
 }
@@ -511,11 +509,11 @@ static bool loudnorm_process_file(const std::string& in_path,
     }
 
     m.gain_db = target_lufs - m.integrated;
-    if (m.peak_db + m.gain_db > target_tp)      // 峰值上限（保守：采样峰值）
-        m.gain_db = target_tp - m.peak_db;
+    if (m.true_peak_db + m.gain_db > target_tp)     // 真峰值上限
+        m.gain_db = target_tp - m.true_peak_db;
 
     std::cout << "loudnorm: integrated " << m.integrated << " LUFS, LRA " << m.range
-              << " LU, sample peak " << m.peak_db << " dBFS -> gain " << m.gain_db
+              << " LU, true peak " << m.true_peak_db << " dBTP -> gain " << m.gain_db
               << " dB (target " << target_lufs << " LUFS / " << target_tp << " dBTP)\n";
 
     const double gain = std::pow(10.0, m.gain_db / 20.0);

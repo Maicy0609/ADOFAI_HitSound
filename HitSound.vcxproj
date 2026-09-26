@@ -132,10 +132,12 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="HitSound.cpp" />
-    <!-- FFmpeg 的 EBU R128 实现（原样引入，见 THIRD-PARTY-NOTICES.md）。
-         ebur128.c 用到 M_PI，MSVC 下需要 _USE_MATH_DEFINES。 -->
-    <ClCompile Include="third_party\ffmpeg\ebur128\ebur128.c">
+    <!-- libebur128（MIT，原样引入，见 THIRD-PARTY-NOTICES.md）。
+         ebur128.c 用到 M_PI，MSVC 下需要 _USE_MATH_DEFINES；
+         它 include 的 <sys/queue.h> 由 /Ithird_party\ebur128 解析到本仓库的替身。 -->
+    <ClCompile Include="third_party\ebur128\ebur128.c">
       <PreprocessorDefinitions>_USE_MATH_DEFINES;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>third_party\ebur128;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
